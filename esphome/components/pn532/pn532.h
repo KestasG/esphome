@@ -6,9 +6,13 @@
 #include "esphome/components/nfc/nfc_tag.h"
 #include "esphome/components/nfc/nfc.h"
 #include "esphome/components/nfc/automation.h"
+#include "esphome/core/time.h"
+#include "esphome/core/application.h"
+
 
 #include <cinttypes>
 #include <vector>
+#include <map>
 
 namespace esphome {
 namespace pn532 {
@@ -25,6 +29,24 @@ enum PN532ReadReady {
   TIMEOUT,
   READY,
 };
+
+//card types by SAK as defined in https://www.nxp.com/docs/en/application-note/AN10833.pdf
+//used for simplified identification without GetVersion call
+//dont't have cards for testing so le commented out
+//static const uint8_t MIFARE_CLASSIC1K_SAK = 0x08;
+//static const uint8_t MIFARE_CLASSIC1K_SAK = 0x28;
+//static const uint8_t MIFARE_CLASSIC4K_SAK = 0x38;
+//static const uint8_t MIFARE_CLASSIC2K_SAK = 0x19;
+//static const uint8_t MIFARE_ULTRALIGHT_SAK = 0x00;
+//mifare plus has lot of subtypes
+static const uint8_t MIFARE_PLUS_DESFIRE_SAK = 0x20; //found used in credit cards
+
+//static const uint8_t MIFARE_PLUS_01_SAK = 0x08; 
+//static const uint8_t MIFARE_PLUS_02_SAK = 0x18; 
+//static const uint8_t MIFARE_PLUS_03_SAK = 0x10; 
+//static const uint8_t MIFARE_PLUS_04_SAK = 0x11; 
+
+static const uint8_t MIFARE_PLUS_04_SAK = 0x11; 
 
 class PN532BinarySensor;
 
@@ -56,7 +78,7 @@ class PN532 : public PollingComponent {
   void write_mode(nfc::NdefMessage *message);
   bool powerdown();
 
- protected:
+ 
   void turn_off_rf_();
   bool write_command_(const std::vector<uint8_t> &data);
   bool read_ack_();
@@ -69,7 +91,7 @@ class PN532 : public PollingComponent {
   virtual bool read_data(std::vector<uint8_t> &data, uint8_t len) = 0;
   virtual bool read_response(uint8_t command, std::vector<uint8_t> &data) = 0;
 
-  std::unique_ptr<nfc::NfcTag> read_tag_(std::vector<uint8_t> &uid);
+  std::unique_ptr<nfc::NfcTag> read_tag_(uint8_t SAK, std::vector<uint8_t> &uid);
 
   bool format_tag_(std::vector<uint8_t> &uid);
   bool clean_tag_(std::vector<uint8_t> &uid);
@@ -92,6 +114,15 @@ class PN532 : public PollingComponent {
   bool write_mifare_ultralight_page_(uint8_t page_num, std::vector<uint8_t> &write_data);
   bool write_mifare_ultralight_tag_(std::vector<uint8_t> &uid, nfc::NdefMessage *message);
   bool clean_mifare_ultralight_();
+
+  std::unique_ptr<nfc::NfcTag> read_mifare_plus_tag_(std::vector<uint8_t> &uid);
+  bool read_mifare_plus_bytes_(uint8_t start_page, uint16_t num_bytes, std::vector<uint8_t> &data);
+  bool is_mifare_plus_formatted_(const std::vector<uint8_t> &page_3_to_6);
+  bool sendAPDU(std::vector<uint8_t> &apdu, std::vector<uint8_t> &aresponse);
+  void parseTags(std::vector<uint8_t> &ber_data, std::map<uint16_t, uint8_t*> &tagMap);
+  std::vector<uint8_t> findTag(std::vector<uint8_t> &ber_data, uint16_t tagToFind);
+  std::vector<uint8_t> constructPdolData(std::vector<uint8_t> &pdol);
+  
 
   bool updates_enabled_{true};
   bool requested_read_{false};
