@@ -42,7 +42,7 @@ bool PN532Spi::write_data(const std::vector<uint8_t> &data) {
 }
 
 bool PN532Spi::read_data(std::vector<uint8_t> &data, uint8_t len) {
-  ESP_LOGV(TAG, "Waiting for ready byte...");
+  ESP_LOGV(TAG, "Waiting for ready byte... Custom inplementation");
 
   uint32_t start_time = millis();
   while (true) {
