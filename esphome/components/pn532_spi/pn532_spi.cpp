@@ -1,4 +1,4 @@
-#include "pn532_spi_k.h"
+#include "pn532_spi.h"
 #include "esphome/core/log.h"
 
 // Based on:
