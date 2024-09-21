@@ -21,6 +21,14 @@ void PN532Spi::setup() {
   PN532::setup();
 }
 
+bool PN532Spi::is_read_ready() {
+  this->enable();
+  this->write_byte(0x02);
+  bool ready = this->read_byte() == 0x01;
+  this->disable();
+  return ready;
+}
+
 bool PN532Spi::write_data(const std::vector<uint8_t> &data) {
   this->enable();
   delay(2);
