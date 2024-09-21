@@ -15,6 +15,8 @@ namespace pn532 {
 static const char *const TAG = "pn532";
 
 void PN532::setup() {
+  ESP_LOGCONFIG(TAG, "Setting up PN532...");
+
   // Get version data
   if (!this->write_command_({PN532_COMMAND_VERSION_DATA})) {
     ESP_LOGW(TAG, "Error sending version command, trying again");
@@ -129,6 +131,8 @@ void PN532::loop() {
   if (ready == WOULDBLOCK)
     return;
 
+  this->last_sak_valid_ = false;
+
   bool success = false;
   std::vector<uint8_t> read;
 
@@ -170,6 +174,11 @@ void PN532::loop() {
   if (read.size() < 6U + nfcid_length) {
     // oops, pn532 returned invalid data
     return;
+  }
+
+  if (read.size() > 4) {
+    this->last_sak_ = read[4];
+    this->last_sak_valid_ = true;
   }
 
   bool report = true;
@@ -324,7 +333,7 @@ enum PN532ReadReady PN532::read_ready_(bool block) {
       break;
     }
 
-    if (millis() - this->rd_start_time_ > 100) {
+    if (millis() - this->rd_start_time_ > 200) {
       ESP_LOGV(TAG, "Timed out waiting for readiness from PN532!");
       this->rd_ready_ = TIMEOUT;
       break;
@@ -355,7 +364,20 @@ void PN532::turn_off_rf_() {
   });
 }
 
+// SAK 0x20 indicates an ISO/IEC 14443-4 compliant PICC (e.g. MIFARE Plus/Desfire) per NXP AN10833.
+constexpr uint8_t kSakIsoDepPicc = 0x20;
+
 std::unique_ptr<nfc::NfcTag> PN532::read_tag_(std::vector<uint8_t> &uid) {
+  if (this->last_sak_valid_ && this->last_sak_ == kSakIsoDepPicc) {
+    // ISO-DEP compliant PICCs (SAK 0x20) may host EMV applications. Use the specialised reader
+    // to run the APDU flow and synthesise an NDEF payload.
+    auto tag = this->read_mifare_plus_tag_(uid);
+    this->last_sak_valid_ = false;
+    if (tag != nullptr)
+      return tag;
+  }
+  this->last_sak_valid_ = false;
+
   uint8_t type = nfc::guess_tag_type(uid.size());
 
   if (type == nfc::TAG_TYPE_MIFARE_CLASSIC) {

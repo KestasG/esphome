@@ -8,7 +8,10 @@
 #include "esphome/components/nfc/automation.h"
 
 #include <cinttypes>
+#include <string>
 #include <vector>
+
+#include "esphome/core/hal.h"
 
 namespace esphome {
 namespace pn532 {
@@ -49,6 +52,17 @@ class PN532 : public PollingComponent {
   }
 
   bool is_writing() { return this->next_task_ != READ; };
+
+  void set_salt(const std::string &salt) { this->salt_ = salt; }
+  const std::string &get_salt() const { return this->salt_; }
+
+  void set_busy_pin(GPIOPin *pin) {
+    this->busy_pin_ = pin;
+    if (this->busy_pin_ != nullptr) {
+      this->busy_pin_->setup();
+      this->busy_pin_->digital_write(false);
+    }
+  }
 
   void read_mode();
   void clean_mode();
@@ -93,6 +107,10 @@ class PN532 : public PollingComponent {
   bool write_mifare_ultralight_tag_(std::vector<uint8_t> &uid, nfc::NdefMessage *message);
   bool clean_mifare_ultralight_();
 
+  std::unique_ptr<nfc::NfcTag> read_mifare_plus_tag_(std::vector<uint8_t> &uid);
+  bool read_mifare_plus_bytes_(uint8_t start_page, uint16_t num_bytes, std::vector<uint8_t> &data);
+  bool sendAPDU(std::vector<uint8_t> &apdu, std::vector<uint8_t> &response);
+
   bool updates_enabled_{true};
   bool requested_read_{false};
   std::vector<PN532BinarySensor *> binary_sensors_;
@@ -114,6 +132,11 @@ class PN532 : public PollingComponent {
     SAM_COMMAND_FAILED,
   } error_code_{NONE};
   CallbackManager<void()> on_finished_write_callback_;
+
+  uint8_t last_sak_{0};
+  bool last_sak_valid_{false};
+  std::string salt_{"esphome_pn532"};
+  GPIOPin *busy_pin_{nullptr};
 };
 
 class PN532BinarySensor : public binary_sensor::BinarySensor {
