@@ -1,4 +1,4 @@
-#include "pn532_spi.h"
+#include "pn532_spi_k.h"
 #include "esphome/core/log.h"
 
 // Based on:
@@ -9,24 +9,16 @@
 namespace esphome {
 namespace pn532_spi {
 
-static const char *const TAG = "pn532_spi";
+static const char *const TAG = "pn532_spiK";
 
 void PN532Spi::setup() {
-  ESP_LOGI(TAG, "PN532Spi setup started!");
+  ESP_LOGV(TAG, "PN532Spi setup started!");
   this->spi_setup();
 
   this->cs_->digital_write(false);
   delay(10);
-  ESP_LOGI(TAG, "SPI setup finished!");
+  ESP_LOGV(TAG, "SPI setup finished!");
   PN532::setup();
-}
-
-bool PN532Spi::is_read_ready() {
-  this->enable();
-  this->write_byte(0x02);
-  bool ready = this->read_byte() == 0x01;
-  this->disable();
-  return ready;
 }
 
 bool PN532Spi::write_data(const std::vector<uint8_t> &data) {
@@ -42,8 +34,24 @@ bool PN532Spi::write_data(const std::vector<uint8_t> &data) {
 }
 
 bool PN532Spi::read_data(std::vector<uint8_t> &data, uint8_t len) {
-  if (this->read_ready_(true) != pn532::PN532ReadReady::READY) {
-    return false;
+  ESP_LOGV(TAG, "Waiting for ready byte...");
+
+  uint32_t start_time = millis();
+  while (true) {
+    this->enable();
+    // First byte, communication mode: Read state
+    this->write_byte(0x02);
+    bool ready = (this->read_byte() & 0x01) == 0x01;
+    this->disable();
+    if (ready)
+      break;
+    //ESP_LOGV(TAG, "Not ready yet...");
+
+    if (millis() - start_time > 150) {
+      ESP_LOGV(TAG, "Timed out waiting for readiness from PN532!");
+      return false;
+    }
+    yield();
   }
 
   // Read data (transmission from the PN532 to the host)
@@ -64,8 +72,25 @@ bool PN532Spi::read_data(std::vector<uint8_t> &data, uint8_t len) {
 bool PN532Spi::read_response(uint8_t command, std::vector<uint8_t> &data) {
   ESP_LOGV(TAG, "Reading response");
 
-  if (this->read_ready_(true) != pn532::PN532ReadReady::READY) {
-    return false;
+  uint32_t start_time = millis();
+  while (true) {
+    this->enable();
+    delay(2);
+    // First byte, communication mode: Read state
+    this->write_byte(0x02);
+    yield();
+    bool ready = (this->read_byte() & 0x01) == 0x01;
+    this->disable();    
+    if (ready)
+      break;
+    //ESP_LOGV(TAG, "Not ready yet...");    
+
+    if (millis() - start_time > 150) {
+      //ESP_LOGV(TAG, "Timed out waiting for readiness from PN532!");
+      return false;
+    }
+    //delay(2);
+    yield();
   }
 
   this->enable();
@@ -85,7 +110,7 @@ bool PN532Spi::read_response(uint8_t command, std::vector<uint8_t> &data) {
 
   bool valid_header = (static_cast<uint8_t>(header[3] + header[4]) == 0 &&  // LCS, len + lcs = 0
                        header[5] == 0xD5 &&        // TFI - frame from PN532 to system controller
-                       header[6] == command + 1);  // Correct command response
+                       (header[6] == command + 1 || header[6] == command));  // Correct command response
 
   if (!valid_header) {
     ESP_LOGV(TAG, "read data invalid header!");
