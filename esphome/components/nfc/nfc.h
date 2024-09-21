@@ -45,6 +45,15 @@ static const uint8_t MIFARE_CMD_NAK_CRC_ERROR_XFER_BUFF_VALID = 0x01;
 static const uint8_t MIFARE_CMD_NAK_INVALID_XFER_BUFF_INVALID = 0x04;
 static const uint8_t MIFARE_CMD_NAK_CRC_ERROR_XFER_BUFF_INVALID = 0x05;
 
+// EMV & NFC tags https://www.eftlab.com/knowledge-base/complete-list-of-emv-nfc-tags
+static const uint8_t EMV_TAG_AID = 0x4F;
+static const uint16_t EMV_TAG_PDOL = 0x9F38;
+static const uint16_t EMV_TAG_COMMAND = 0x83;
+static const uint16_t EMV_TAG_TRACK2 = 0x57;
+static const uint16_t EMV_TAG_TRACK1 = 0x56;
+static const uint16_t EMV_TAG_PAN = 0x5A;
+
+
 static const char *const MIFARE_CLASSIC = "Mifare Classic";
 static const char *const NFC_FORUM_TYPE_2 = "NFC Forum Type 2";
 static const char *const ERROR = "Error";
