@@ -2,6 +2,9 @@
 
 #include "pn532.h"
 #include "esphome/core/log.h"
+#define MBEDTLS_CONFIG_FILE "mbedtls/esp_config.h"
+#include "mbedtls/aes.h"
+#include "mbedtls/sha256.h"
 
 namespace esphome {
 namespace pn532 {
@@ -101,26 +104,111 @@ std::unique_ptr<nfc::NfcTag> PN532::read_mifare_plus_tag_(std::vector<uint8_t> &
   return make_unique<nfc::NfcTag>(uid, nfc::NFC_FORUM_TYPE_2, data);
 }
 
+// (A) Hex encoder for logging
+static inline std::string to_hex(const uint8_t *buf, size_t len) {
+  char out[129]; // enough for 64 bytes if ever needed
+  size_t p = 0;
+  for (size_t i = 0; i < len; i++) {
+    std::sprintf(out + p, "%02x", buf[i]);
+    p += 2;
+  }
+  out[p] = '\0';
+  return std::string(out);
+}
+
+// (B) SHA-256 on arbitrary bytes -> 32-byte digest
+static inline bool sha256_bytes(const uint8_t *buf, size_t len, uint8_t out32[32]) {
+  mbedtls_sha256_context ctx;
+  mbedtls_sha256_init(&ctx);
+  if (mbedtls_sha256_starts_ret(&ctx, 0) != 0) { mbedtls_sha256_free(&ctx); return false; }
+  if (mbedtls_sha256_update_ret(&ctx, buf, len) != 0) { mbedtls_sha256_free(&ctx); return false; }
+  if (mbedtls_sha256_finish_ret(&ctx, out32) != 0)     { mbedtls_sha256_free(&ctx); return false; }
+  mbedtls_sha256_free(&ctx);
+  return true;
+}
+
+// (C) Extract digit nibbles (0..9) from Track-2-equivalent (9F6B) bytes until 'D' nibble (0xD).
+//     Ignores 0xF padding. Enforces 8..19 digits. Returns true on success.
+static bool pan_from_track2_nibbles_(const std::vector<uint8_t>& t2, uint8_t digits[19], size_t &dlen) {
+  dlen = 0;
+  bool found_term = false;
+  auto push = [&](uint8_t nib) -> bool {
+    if (nib == 0x0D) { found_term = true; return true; }     // 'D' separator
+    if (nib == 0x0F) return true;                            // padding nibble
+    if (nib <= 9) { if (dlen < 19) { digits[dlen++] = nib; return true; } else return false; }
+    // invalid non-digit nibble before terminator
+    return false;
+  };
+  for (size_t i = 0; i < t2.size() && !found_term; ++i) {
+    uint8_t b = t2[i];
+    if (!push((b >> 4) & 0x0F)) return false;
+    if (found_term) break;
+    if (!push(b & 0x0F))        return false;
+  }
+  if (!found_term) return false;
+  if (dlen < 8 || dlen > 19) return false;
+  return true;
+}
+
+// (D) Extract PAN from Track-1 (tag 56) ASCII: digits until '^'
+static bool pan_from_track1_ascii_(const std::vector<uint8_t>& t1, uint8_t digits[19], size_t &dlen) {
+  dlen = 0;
+  for (size_t i = 0; i < t1.size(); ++i) {
+    char c = static_cast<char>(t1[i]);
+    if (c == '^') break;
+    if (c >= '0' && c <= '9') {
+      if (dlen < 19) digits[dlen++] = static_cast<uint8_t>(c - '0');
+      else return false;
+    } else if (c == ';' || c == 'B') {
+      // Skip common sentinels if present at start
+      continue;
+    } else if (c == ' ') {
+      continue;
+    } else if (c == '\0') {
+      break;
+    } else {
+      // Non-digit before delimiter – tolerate, but only if we already have some digits
+      // If you want to be strict, return false here.
+      continue;
+    }
+  }
+  if (dlen < 8 || dlen > 19) return false;
+  return true;
+}
+
+// (E) Extract PAN from 5A (BCD): nibbles 0..9; ignore trailing 0xF
+static bool pan_from_tag5a_bcd_(const std::vector<uint8_t>& bcd, uint8_t digits[19], size_t &dlen) {
+  dlen = 0;
+  for (size_t i = 0; i < bcd.size(); ++i) {
+    uint8_t hi = (bcd[i] >> 4) & 0x0F;
+    uint8_t lo = bcd[i] & 0x0F;
+    if (hi <= 9) { if (dlen < 19) digits[dlen++] = hi; else return false; }
+    else if (hi != 0x0F) return false;
+    if (lo <= 9) { if (dlen < 19) digits[dlen++] = lo; else return false; }
+    else if (lo == 0x0F) break;      // padding nibble indicates end
+    else return false;
+  }
+  if (dlen < 8 || dlen > 19) return false;
+  return true;
+}
+
+// ---- Your function with hashing added --------------------------------------
+
 bool PN532::read_mifare_plus_bytes_(uint8_t start_page, uint16_t num_bytes, std::vector<uint8_t> &data) {
   std::vector<uint8_t> response;
 
-  //=========================== read file
-
-  // skip proper EMV protocols try reading known file  
+  //=========================== read file (PPSE)
   std::vector<uint8_t> apdu = {
-    0x00, 0xa4, 0x04, 0x00, //APDU SELECT CLA,INS,P1,P2
-    0x0e, // Lc command data length
-    0x32, 0x50, 0x41, 0x59, 0x2e,0x53, 0x59, 0x53, 0x2e, 0x44, 0x44, 0x46, 0x30, 0x31, // commanda data - 2pay.sys.ddf01
-    0x00 // Le
+    0x00, 0xa4, 0x04, 0x00,
+    0x0e,
+    0x32, 0x50, 0x41, 0x59, 0x2e, 0x53, 0x59, 0x53, 0x2e, 0x44, 0x44, 0x46, 0x30, 0x31,
+    0x00
   };
 
   ESP_LOGD(TAG, "Sending request to read file");
-  if (!sendAPDU(apdu, response)) {
-    return false;  //
-  }
-  // the response should contain tag 4F with AID required for next step
-  auto adf_name = findTag(response, nfc::EMV_TAG_AID);
+  if (!sendAPDU(apdu, response)) return false;
 
+  auto adf_name = findTag(response, nfc::EMV_TAG_AID);
   if (adf_name.empty()) {
     ESP_LOGW(TAG, "AID retrieval failed");
     return false;
@@ -128,15 +216,9 @@ bool PN532::read_mifare_plus_bytes_(uint8_t start_page, uint16_t num_bytes, std:
   ESP_LOGD(TAG, "Found ADF name: %s", format_hex_pretty(adf_name).c_str());
 
   //============================== select application
-  // select application
-  // AID 	A0 00 00 00 04 10 10 - Mastercard
-  // apdu = {0x00, 0xa4, 0x04, 0x00, 0x07, 0xA0, 0x00, 0x00, 0x00, 0x04, 0x10, 0x10};
-  apdu = {0x00, 0xa4, 0x04, 0x00};  //APDU SELECT CLA,INS,P1,P2
-
-  // add the AID from previous response
+  apdu = {0x00, 0xa4, 0x04, 0x00};
   apdu.push_back(adf_name.size());
   apdu.insert(std::end(apdu), std::begin(adf_name), std::end(adf_name));
-  //unsure if Lc byte 0x00 is needed at the end
   apdu.push_back(0x00);
 
   ESP_LOGD(TAG, "Sending request to select application and get PDOL #1");
@@ -146,48 +228,23 @@ bool PN532::read_mifare_plus_bytes_(uint8_t start_page, uint16_t num_bytes, std:
       ESP_LOGD(TAG, "Sending request to selct application and get PDOL #3");
       if (!sendAPDU(apdu, response)) {
         ESP_LOGD(TAG, "Failed request to selct application and get PDOL. Givinig up.");
-        return false;  //
+        return false;
       }
     }
   }
 
-  // looking for PDOL
   auto pdol = findTag(response, nfc::EMV_TAG_PDOL);
-  // pdol can be empty
   ESP_LOGD(TAG, "Found PDOL: %s", format_hex_pretty(pdol).c_str());
 
-  //=========================== read AFL
-
-  // construct request from PDOL tags
-
-  
-  
-
-  apdu = {0x80, 0xa8, 0x00, 0x00}; //APDU GPO CLA,INS,P1,P2
-
+  //=========================== GPO (AIP/AFL)
+  apdu = {0x80, 0xa8, 0x00, 0x00};
   auto pdol_data = constructPdolData(pdol);
-  apdu.push_back(pdol_data.size() + 2);  // data len plus tag byte plus len byte
-  apdu.push_back(nfc::EMV_TAG_COMMAND);       // the tag
-  apdu.push_back(pdol_data.size());      // data len
-  apdu.insert(std::end(apdu), std::begin(pdol_data), std::end(pdol_data)); //data
-  apdu.push_back(0x00);                   // Le
-  /*  
-  Empty PDOL example
-  80 a8 00 00 02 83 00 00
-  VISA Example
-  0x23, //length
-  0x83, //tag
-  0x21,//length
-  0x36, 0xA0, 0x40, 0x00,
-  0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
-  0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
-  0x08, 0x40,
-  0x00, 0x00, 0x00, 0x00, 0x00,
-  0x09, 0x78,
-  0x23, 0x11, 0x25,
-  0x00,
-  0x00, 0x10, 0x20, 0x30};
-  */
+  apdu.push_back(pdol_data.size() + 2);
+  apdu.push_back(nfc::EMV_TAG_COMMAND);
+  apdu.push_back(pdol_data.size());
+  apdu.insert(std::end(apdu), std::begin(pdol_data), std::end(pdol_data));
+  apdu.push_back(0x00);
+
   ESP_LOGD(TAG, "Sending request for AFL");
   if (!sendAPDU(apdu, response)) {
     ESP_LOGD(TAG, "Sending request for AFL retry ");
@@ -195,84 +252,101 @@ bool PN532::read_mifare_plus_bytes_(uint8_t start_page, uint16_t num_bytes, std:
       ESP_LOGD(TAG, "Sending request for AFL retry #2");
       if (!sendAPDU(apdu, response)) {
         ESP_LOGD(TAG, "Sending request for AFL failes 3 times. Giving up.");
-        return false;  //
+        return false;
       }
     }
   }
 
-  // some cards (at least Revolut VISA) returns Track 2 data here, so PAN can be retrieved)
-  auto track2 = findTag(response, nfc::EMV_TAG_TRACK2);  
-  ESP_LOGD(TAG, "Found TRACK2: %s", format_hex_pretty(track2).c_str());
-  if (track2.size() > 0) {
-    parse_track2(track2);
-    return false;
+  // ---- Case 1: Some cards return Track-2 (9F6B) in GPO response ------------
+  {
+    auto t2 = findTag(response, nfc::EMV_TAG_TRACK2);
+    if (!t2.empty()) {
+      ESP_LOGD(TAG, "Found TRACK2: %s", format_hex_pretty(t2).c_str());
+      uint8_t digits[19]; size_t dlen = 0;
+      if (pan_from_track2_nibbles_(t2, digits, dlen)) {
+        uint8_t digest[32];
+        if (sha256_bytes(digits, dlen, digest)) {
+          ESP_LOGD(TAG, "PAN SHA256 (from 9F6B@GPO): %s", to_hex(digest, 32).c_str());
+          data.assign(digest, digest + 32);   // <-- raw 32-byte hash returned
+          // If you instead want hex bytes: 
+          // auto hx = to_hex(digest, 32); data.assign(hx.begin(), hx.end());
+          return true;
+        }
+      }
+      // If parsing failed, continue to AFL reads below
+    }
   }
 
-  //=========================== read SFI
-
-  auto afl = findTag(response, 0x94);  // AFL records
+  //=========================== READ RECORDS via AFL ---------------------------
+  auto afl = findTag(response, 0x94);
   ESP_LOGD(TAG, "Found AFL: %s", format_hex_pretty(afl).c_str());
   if (afl.size() < 4 || (afl.size() % 4) != 0) {
     ESP_LOGW(TAG, "Invalid AFL found: %s", format_hex_pretty(afl).c_str());
     return false;
   }
 
-  // for each SFI
   uint8_t pos = 0;
-  while (pos < afl.size() - 4) {  // ensure there are at least 4 bytes to read
-    uint8_t sfi = (afl[pos++] & 0b11111000) |
-                  0b00000100;  // SFI is taken from high 5 bits and 0b100 added meaning we want to read all records
+  while (pos + 3 < afl.size()) {
+    uint8_t sfi_byte = afl[pos++];
     uint8_t start = afl[pos++];
-    uint8_t end = afl[pos++];
-    uint8_t auth_rec = afl[pos++];
-    // for each records inside SFI
+    uint8_t end   = afl[pos++];
+    (void)afl[pos++]; // auth_rec not needed here
+    uint8_t sfi = (sfi_byte & 0b11111000) | 0b00000100;
+
     while (start <= end) {
-      apdu = {0x00, 0xb2};  // apdu READ RECORD
-      apdu.push_back(start);
-      apdu.push_back(sfi);
-      apdu.push_back(0x00);
+      apdu = {0x00, 0xb2, start, sfi, 0x00};
       ESP_LOGD(TAG, "Sending SFI read request");
       if (sendAPDU(apdu, response)) {
-        auto pan = findTag(response, nfc::EMV_TAG_TRACK2);  // TRACK 2
-        yield();
-        if (pan.size() > 0) {
-          pan = parse_track2(pan);
-          return false;
-        } else {
-          pan = findTag(response, nfc::EMV_TAG_TRACK1);  // TRACK 1
-          yield();
-          if (pan.size() > 0) {
-            pan = parse_track1(pan);
-            return false;
-          } else {
-            pan = findTag(response, nfc::EMV_TAG_PAN);  // TRACK 1
-            yield();
-            if (pan.size() > 0) {
-              pan = parse_pan(pan);
-              return false;
+
+        // ---- Try 9F6B (Track-2 equiv, BCD nibbles) -------------------------
+        auto t2 = findTag(response, nfc::EMV_TAG_TRACK2);
+        if (!t2.empty()) {
+          uint8_t digits[19]; size_t dlen = 0;
+          if (pan_from_track2_nibbles_(t2, digits, dlen)) {
+            uint8_t digest[32];
+            if (sha256_bytes(digits, dlen, digest)) {
+              ESP_LOGD(TAG, "PAN SHA256 (from 9F6B): %s", to_hex(digest, 32).c_str());
+              data.assign(digest, digest + 32);
+              return true;
             }
           }
         }
+
+        // ---- Try 56 (Track-1, ASCII) --------------------------------------
+        auto t1 = findTag(response, nfc::EMV_TAG_TRACK1);
+        if (!t1.empty()) {
+          uint8_t digits[19]; size_t dlen = 0;
+          if (pan_from_track1_ascii_(t1, digits, dlen)) {
+            uint8_t digest[32];
+            if (sha256_bytes(digits, dlen, digest)) {
+              ESP_LOGD(TAG, "PAN SHA256 (from 56): %s", to_hex(digest, 32).c_str());
+              data.assign(digest, digest + 32);
+              return true;
+            }
+          }
+        }
+
+        // ---- Try 5A (PAN, BCD) --------------------------------------------
+        auto t5a = findTag(response, nfc::EMV_TAG_PAN);
+        if (!t5a.empty()) {
+          uint8_t digits[19]; size_t dlen = 0;
+          if (pan_from_tag5a_bcd_(t5a, digits, dlen)) {
+            uint8_t digest[32];
+            if (sha256_bytes(digits, dlen, digest)) {
+              ESP_LOGD(TAG, "PAN SHA256 (from 5A): %s", to_hex(digest, 32).c_str());
+              data.assign(digest, digest + 32);
+              return true;
+            }
+          }
+        }
+
       } else {
         ESP_LOGD(TAG, "Failed SFI read request");
       }
       start++;
+      yield();
     }
   }
-
-  // visa revolut infinite
-  // SFI 03  start 07, end 07
-  //apdu = {0x00, 0xb2, 0x07, 0x1C, 0x00};
-
-  // 00 b2 01 0c 00
-  // apdu ={PN532_COMMAND_INDATAEXCHANGE, 0x01, 0x00, 0xb2, 0x01, 0x14, 0x00}; working for garmin pay
-  // apdu = {0x00, 0xb2, 0x01, 0x14, 0x00};
-  /*ESP_LOGD(TAG, "Sending request to read SFI");
-  if (!sendAPDU(apdu, response)) {
-    return false;  //
-  }*/
-
-  // fnv1_hash
 
   ESP_LOGD(TAG, "----------------------------CARD READING FAILED !!!");
   return false;
