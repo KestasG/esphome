@@ -120,9 +120,17 @@ static inline std::string to_hex(const uint8_t *buf, size_t len) {
 static inline bool sha256_bytes(const uint8_t *buf, size_t len, uint8_t out32[32]) {
   mbedtls_sha256_context ctx;
   mbedtls_sha256_init(&ctx);
-  if (mbedtls_sha256_starts_ret(&ctx, 0) != 0) { mbedtls_sha256_free(&ctx); return false; }
-  if (mbedtls_sha256_update_ret(&ctx, buf, len) != 0) { mbedtls_sha256_free(&ctx); return false; }
-  if (mbedtls_sha256_finish_ret(&ctx, out32) != 0)     { mbedtls_sha256_free(&ctx); return false; }
+
+  #if defined(mbedtls_sha256_starts_ret)
+    mbedtls_sha256_starts_ret(&ctx, 0);
+    mbedtls_sha256_update_ret(&ctx, buf, len);
+    mbedtls_sha256_finish_ret(&ctx, out32);
+  #else
+    mbedtls_sha256_starts(&ctx, 0);
+    mbedtls_sha256_update(&ctx, buf, len);
+    mbedtls_sha256_finish(&ctx, out32);
+  #endif
+
   mbedtls_sha256_free(&ctx);
   return true;
 }
