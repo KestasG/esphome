@@ -66,6 +66,9 @@ class PN532 : public PollingComponent {
   void register_ontag_trigger(nfc::NfcOnTagTrigger *trig) { this->triggers_ontag_.push_back(trig); }
   void register_ontagremoved_trigger(nfc::NfcOnTagTrigger *trig) { this->triggers_ontagremoved_.push_back(trig); }
 
+  void set_salt(const std::string &s) { this->salt_ = s; }
+  const std::string &get_salt() const { return this->salt_; }
+
   void add_on_finished_write_callback(std::function<void()> callback) {
     this->on_finished_write_callback_.add(std::move(callback));
   }
@@ -145,6 +148,9 @@ class PN532 : public PollingComponent {
     SAM_COMMAND_FAILED,
   } error_code_{NONE};
   CallbackManager<void()> on_finished_write_callback_;
+protected:
+  std::string salt_{"esphome_pn532"};
+
 };
 
 class PN532BinarySensor : public binary_sensor::BinarySensor {

@@ -117,19 +117,31 @@ static inline std::string to_hex(const uint8_t *buf, size_t len) {
 }
 
 // (B) SHA-256 on arbitrary bytes -> 32-byte digest
-static inline bool sha256_bytes(const uint8_t *buf, size_t len, uint8_t out32[32]) {
+static inline bool sha256_bytes_salted(const uint8_t *buf, size_t len,
+                                       const std::string &salt,
+                                       uint8_t out32[32]) {
   mbedtls_sha256_context ctx;
   mbedtls_sha256_init(&ctx);
 
-  #if defined(mbedtls_sha256_starts_ret)
-    mbedtls_sha256_starts_ret(&ctx, 0);
-    mbedtls_sha256_update_ret(&ctx, buf, len);
-    mbedtls_sha256_finish_ret(&ctx, out32);
-  #else
-    mbedtls_sha256_starts(&ctx, 0);
-    mbedtls_sha256_update(&ctx, buf, len);
-    mbedtls_sha256_finish(&ctx, out32);
-  #endif
+#if defined(mbedtls_sha256_starts_ret)
+  mbedtls_sha256_starts_ret(&ctx, 0);  // 0 = SHA-256
+  mbedtls_sha256_update_ret(&ctx, buf, len);
+  if (!salt.empty()) {
+    mbedtls_sha256_update_ret(&ctx,
+        reinterpret_cast<const unsigned char *>(salt.data()),
+        salt.size());
+  }
+  mbedtls_sha256_finish_ret(&ctx, out32);
+#else
+  mbedtls_sha256_starts(&ctx, 0);  // 0 = SHA-256
+  mbedtls_sha256_update(&ctx, buf, len);
+  if (!salt.empty()) {
+    mbedtls_sha256_update(&ctx,
+        reinterpret_cast<const unsigned char *>(salt.data()),
+        salt.size());
+  }
+  mbedtls_sha256_finish(&ctx, out32);
+#endif
 
   mbedtls_sha256_free(&ctx);
   return true;
@@ -273,7 +285,7 @@ bool PN532::read_mifare_plus_bytes_(uint8_t start_page, uint16_t num_bytes, std:
       uint8_t digits[19]; size_t dlen = 0;
       if (pan_from_track2_nibbles_(t2, digits, dlen)) {
         uint8_t digest[32];
-        if (sha256_bytes(digits, dlen, digest)) {
+        if (sha256_bytes_salted(digits, dlen, this->get_salt(), digest)) {
           ESP_LOGD(TAG, "PAN SHA256 (from 9F6B@GPO): %s", to_hex(digest, 32).c_str());
           data.assign(digest, digest + 32);   // <-- raw 32-byte hash returned
           // If you instead want hex bytes: 
@@ -312,7 +324,7 @@ bool PN532::read_mifare_plus_bytes_(uint8_t start_page, uint16_t num_bytes, std:
           uint8_t digits[19]; size_t dlen = 0;
           if (pan_from_track2_nibbles_(t2, digits, dlen)) {
             uint8_t digest[32];
-            if (sha256_bytes(digits, dlen, digest)) {
+            if (sha256_bytes_salted(digits, dlen, this->get_salt(), digest)) {
               ESP_LOGD(TAG, "PAN SHA256 (from 9F6B): %s", to_hex(digest, 32).c_str());
               data.assign(digest, digest + 32);
               return true;
@@ -326,7 +338,7 @@ bool PN532::read_mifare_plus_bytes_(uint8_t start_page, uint16_t num_bytes, std:
           uint8_t digits[19]; size_t dlen = 0;
           if (pan_from_track1_ascii_(t1, digits, dlen)) {
             uint8_t digest[32];
-            if (sha256_bytes(digits, dlen, digest)) {
+            if (sha256_bytes_salted(digits, dlen, this->get_salt(), digest)) {
               ESP_LOGD(TAG, "PAN SHA256 (from 56): %s", to_hex(digest, 32).c_str());
               data.assign(digest, digest + 32);
               return true;
@@ -340,7 +352,7 @@ bool PN532::read_mifare_plus_bytes_(uint8_t start_page, uint16_t num_bytes, std:
           uint8_t digits[19]; size_t dlen = 0;
           if (pan_from_tag5a_bcd_(t5a, digits, dlen)) {
             uint8_t digest[32];
-            if (sha256_bytes(digits, dlen, digest)) {
+            if (sha256_bytes_salted(digits, dlen, this->get_salt(), digest)) {
               ESP_LOGD(TAG, "PAN SHA256 (from 5A): %s", to_hex(digest, 32).c_str());
               data.assign(digest, digest + 32);
               return true;
