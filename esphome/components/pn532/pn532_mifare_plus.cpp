@@ -116,34 +116,81 @@ static inline std::string to_hex(const uint8_t *buf, size_t len) {
   return std::string(out);
 }
 
-// (B) SHA-256 on arbitrary bytes -> 32-byte digest
+#include "mbedtls/sha256.h"
+
+// Build NDEF Text message from given text
+static inline void make_ndef_text_message(const std::string &text, std::vector<uint8_t> &out) {
+  out.clear();
+  const char *type_T = "T";
+  const std::string lang = "en";   // language code
+
+  // Payload: [status][lang][text]
+  const uint8_t status = static_cast<uint8_t>(lang.size() & 0x3F);
+  const size_t payload_len = 1 + lang.size() + text.size();
+
+  if (payload_len > 255) {
+    // Truncate text to fit SR record
+    const size_t max_text = 255 - 1 - lang.size();
+    return make_ndef_text_message(text.substr(0, max_text), out);
+  }
+
+  const uint8_t MB = 0x80;
+  const uint8_t ME = 0x40;
+  const uint8_t SR = 0x10;
+  const uint8_t TNF_WK = 0x01;  // Well-known
+  const uint8_t header = MB | ME | SR | TNF_WK;  // 0xD1
+
+  out.reserve(3 + 1 + payload_len);
+  out.push_back(header);
+  out.push_back(0x01);                      // TYPE LENGTH
+  out.push_back(static_cast<uint8_t>(payload_len));
+  out.push_back(static_cast<uint8_t>(type_T[0]));   // 'T'
+  out.push_back(status);
+  out.insert(out.end(), lang.begin(), lang.end());
+  out.insert(out.end(), text.begin(), text.end());
+}
+
+// Compute salted SHA-256 of buf+salt and directly return as NDEF message
 static inline bool sha256_bytes_salted(const uint8_t *buf, size_t len,
                                        const std::string &salt,
-                                       uint8_t out32[32]) {
+                                       std::vector<uint8_t> &ndef_out) {
+  uint8_t digest[32];
   mbedtls_sha256_context ctx;
   mbedtls_sha256_init(&ctx);
 
 #if defined(mbedtls_sha256_starts_ret)
-  mbedtls_sha256_starts_ret(&ctx, 0);  // 0 = SHA-256
+  mbedtls_sha256_starts_ret(&ctx, 0);
   mbedtls_sha256_update_ret(&ctx, buf, len);
   if (!salt.empty()) {
     mbedtls_sha256_update_ret(&ctx,
-        reinterpret_cast<const unsigned char *>(salt.data()),
-        salt.size());
+        reinterpret_cast<const unsigned char*>(salt.data()), salt.size());
   }
-  mbedtls_sha256_finish_ret(&ctx, out32);
+  mbedtls_sha256_finish_ret(&ctx, digest);
 #else
-  mbedtls_sha256_starts(&ctx, 0);  // 0 = SHA-256
+  mbedtls_sha256_starts(&ctx, 0);
   mbedtls_sha256_update(&ctx, buf, len);
   if (!salt.empty()) {
     mbedtls_sha256_update(&ctx,
-        reinterpret_cast<const unsigned char *>(salt.data()),
-        salt.size());
+        reinterpret_cast<const unsigned char*>(salt.data()), salt.size());
   }
-  mbedtls_sha256_finish(&ctx, out32);
+  mbedtls_sha256_finish(&ctx, digest);
 #endif
 
   mbedtls_sha256_free(&ctx);
+
+  // Convert digest to hex
+  char hexbuf[65];
+  for (int i = 0; i < 32; i++) {
+    sprintf(&hexbuf[i * 2], "%02x", digest[i]);
+  }
+  hexbuf[64] = '\0';
+
+  // Prefix the text so you can distinguish it
+  std::string text = std::string("pan-sha256:") + hexbuf;
+
+  // Build valid NDEF Text record
+  make_ndef_text_message(text, ndef_out);
+
   return true;
 }
 
@@ -283,13 +330,9 @@ bool PN532::read_mifare_plus_bytes_(uint8_t start_page, uint16_t num_bytes, std:
     if (!t2.empty()) {
       ESP_LOGD(TAG, "Found TRACK2: %s", format_hex_pretty(t2).c_str());
       uint8_t digits[19]; size_t dlen = 0;
-      if (pan_from_track2_nibbles_(t2, digits, dlen)) {
-        uint8_t digest[32];
-        if (sha256_bytes_salted(digits, dlen, this->get_salt(), digest)) {
-          ESP_LOGD(TAG, "PAN SHA256 (from 9F6B@GPO): %s", to_hex(digest, 32).c_str());
-          data.assign(digest, digest + 32);   // <-- raw 32-byte hash returned
-          // If you instead want hex bytes: 
-          // auto hx = to_hex(digest, 32); data.assign(hx.begin(), hx.end());
+      if (pan_from_track2_nibbles_(t2, digits, dlen)) {        
+        if (sha256_bytes_salted(digits, dlen, this->get_salt(), data)) {
+          ESP_LOGD(TAG, "NDEF (PAN hash) size=%u", (unsigned)data.size());
           return true;
         }
       }
@@ -323,10 +366,8 @@ bool PN532::read_mifare_plus_bytes_(uint8_t start_page, uint16_t num_bytes, std:
         if (!t2.empty()) {
           uint8_t digits[19]; size_t dlen = 0;
           if (pan_from_track2_nibbles_(t2, digits, dlen)) {
-            uint8_t digest[32];
-            if (sha256_bytes_salted(digits, dlen, this->get_salt(), digest)) {
-              ESP_LOGD(TAG, "PAN SHA256 (from 9F6B): %s", to_hex(digest, 32).c_str());
-              data.assign(digest, digest + 32);
+            if (sha256_bytes_salted(digits, dlen, this->get_salt(), data)) {
+              ESP_LOGD(TAG, "NDEF (PAN hash) size=%u", (unsigned)data.size());
               return true;
             }
           }
@@ -337,10 +378,8 @@ bool PN532::read_mifare_plus_bytes_(uint8_t start_page, uint16_t num_bytes, std:
         if (!t1.empty()) {
           uint8_t digits[19]; size_t dlen = 0;
           if (pan_from_track1_ascii_(t1, digits, dlen)) {
-            uint8_t digest[32];
-            if (sha256_bytes_salted(digits, dlen, this->get_salt(), digest)) {
-              ESP_LOGD(TAG, "PAN SHA256 (from 56): %s", to_hex(digest, 32).c_str());
-              data.assign(digest, digest + 32);
+            if (sha256_bytes_salted(digits, dlen, this->get_salt(), data)) {
+              ESP_LOGD(TAG, "NDEF (PAN hash) size=%u", (unsigned)data.size());
               return true;
             }
           }
@@ -350,11 +389,9 @@ bool PN532::read_mifare_plus_bytes_(uint8_t start_page, uint16_t num_bytes, std:
         auto t5a = findTag(response, nfc::EMV_TAG_PAN);
         if (!t5a.empty()) {
           uint8_t digits[19]; size_t dlen = 0;
-          if (pan_from_tag5a_bcd_(t5a, digits, dlen)) {
-            uint8_t digest[32];
-            if (sha256_bytes_salted(digits, dlen, this->get_salt(), digest)) {
-              ESP_LOGD(TAG, "PAN SHA256 (from 5A): %s", to_hex(digest, 32).c_str());
-              data.assign(digest, digest + 32);
+          if (pan_from_tag5a_bcd_(t5a, digits, dlen)) {         
+            if (sha256_bytes_salted(digits, dlen, this->get_salt(), data)) {
+              ESP_LOGD(TAG, "NDEF (PAN hash) size=%u", (unsigned)data.size());
               return true;
             }
           }
