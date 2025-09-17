@@ -15,7 +15,7 @@ namespace pn532 {
 
 static const char *const TAG = "pn532";
 
-void PN532Spi::init_busy_pin_() {
+void PN532::init_busy_pin_() {
   if (this->busy_pin_ != nullptr) {
     this->busy_pin_->setup();              // respects YAML mode/inverted
     this->busy_pin_->digital_write(false); // idle = not busy
@@ -466,7 +466,7 @@ void PN532::turn_off_rf_() {
 
 std::unique_ptr<nfc::NfcTag> PN532::read_tag_(uint8_t SAK, std::vector<uint8_t> &uid) {
 
-  PN532Spi::BusyGuard busy(this->busy_pin_);//activaet busy pin for duration of tag read
+  PN532::BusyGuard busy(this->busy_pin_);//activaet busy pin for duration of tag read
 
   ESP_LOGV(TAG, "Passed SAK 0x%02X", SAK);
   if(SAK == MIFARE_PLUS_DESFIRE_SAK){  
