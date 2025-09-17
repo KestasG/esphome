@@ -15,6 +15,13 @@ namespace pn532 {
 
 static const char *const TAG = "pn532";
 
+void PN532Spi::init_busy_pin_() {
+  if (this->busy_pin_ != nullptr) {
+    this->busy_pin_->setup();              // respects YAML mode/inverted
+    this->busy_pin_->digital_write(false); // idle = not busy
+  }
+}
+
 void PN532::setup() {
   ESP_LOGD(TAG, "-----------------------STARTING SETUP");
   ESP_LOGCONFIG(TAG, "Setting up PN532...");
@@ -104,6 +111,7 @@ void PN532::setup() {
     this->error_code_ = SAM_COMMAND_FAILED;
     this->mark_failed();
 
+     this->init_busy_pin_();
 
     return;
   }
@@ -457,6 +465,9 @@ void PN532::turn_off_rf_() {
 }
 
 std::unique_ptr<nfc::NfcTag> PN532::read_tag_(uint8_t SAK, std::vector<uint8_t> &uid) {
+
+  PN532Spi::BusyGuard busy(this->busy_pin_);//activaet busy pin for duration of tag read
+
   ESP_LOGV(TAG, "Passed SAK 0x%02X", SAK);
   if(SAK == MIFARE_PLUS_DESFIRE_SAK){  
     ESP_LOGD(TAG, "Mifare Plus/Desfire. Will try read as EMV");
@@ -546,6 +557,12 @@ void PN532::dump_config() {
   }
 
   LOG_UPDATE_INTERVAL(this);
+
+  if (this->busy_pin_ != nullptr) {
+    LOG_PIN("  Busy Pin: ", this->busy_pin_);
+  } else {
+    ESP_LOGD(TAG, "  Busy Pin: not configured");
+  }
 
   for (auto *child : this->binary_sensors_) {
     LOG_BINARY_SENSOR("  ", "Tag", child);

@@ -8,6 +8,7 @@
 #include "esphome/components/nfc/automation.h"
 #include "esphome/core/time.h"
 #include "esphome/core/application.h"
+#include "esphome/core/hal.h"
 
 
 #include <cinttypes>
@@ -68,6 +69,8 @@ class PN532 : public PollingComponent {
 
   void set_salt(const std::string &s) { this->salt_ = s; }
   const std::string &get_salt() const { return this->salt_; }
+
+  void set_busy_pin(GPIOPin *pin) { this->busy_pin_ = pin; }
 
   void add_on_finished_write_callback(std::function<void()> callback) {
     this->on_finished_write_callback_.add(std::move(callback));
@@ -150,6 +153,15 @@ class PN532 : public PollingComponent {
   CallbackManager<void()> on_finished_write_callback_;
 protected:
   std::string salt_{"esphome_pn532"};
+  GPIOPin *busy_pin_{nullptr};
+   // RAII guard: sets BUSY high on construct, low on destruct
+  struct BusyGuard {
+    GPIOPin *pin;
+    explicit BusyGuard(GPIOPin *p) : pin(p) { if (pin) pin->digital_write(true); }
+    ~BusyGuard() { if (pin) pin->digital_write(false); }
+  };
+
+  void init_busy_pin_();
 
 };
 

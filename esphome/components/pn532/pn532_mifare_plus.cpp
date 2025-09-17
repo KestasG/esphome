@@ -116,8 +116,6 @@ static inline std::string to_hex(const uint8_t *buf, size_t len) {
   return std::string(out);
 }
 
-#include "mbedtls/sha256.h"
-
 // Build NDEF Text message from given text
 static inline void make_ndef_text_message(const std::string &text, std::vector<uint8_t> &out) {
   out.clear();
@@ -258,8 +256,6 @@ static bool pan_from_tag5a_bcd_(const std::vector<uint8_t>& bcd, uint8_t digits[
   if (dlen < 8 || dlen > 19) return false;
   return true;
 }
-
-// ---- Your function with hashing added --------------------------------------
 
 bool PN532::read_mifare_plus_bytes_(uint8_t start_page, uint16_t num_bytes, std::vector<uint8_t> &data) {
   std::vector<uint8_t> response;
