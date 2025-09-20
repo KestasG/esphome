@@ -159,7 +159,7 @@ protected:
     GPIOPin *pin;
     explicit BusyGuard(GPIOPin *p) : pin(p) { if (pin) {
       pin->digital_write(true); 
-      ESP_LOGD(TAG, "Busy pin activated");
+      ESP_LOGD("pn532_spiK", "Busy pin activated");
     }
   }
     ~BusyGuard() { if (pin) pin->digital_write(false); }
