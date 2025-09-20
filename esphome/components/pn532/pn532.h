@@ -157,7 +157,11 @@ protected:
    // RAII guard: sets BUSY high on construct, low on destruct
   struct BusyGuard {
     GPIOPin *pin;
-    explicit BusyGuard(GPIOPin *p) : pin(p) { if (pin) pin->digital_write(true); }
+    explicit BusyGuard(GPIOPin *p) : pin(p) { if (pin) {
+      pin->digital_write(true); 
+      ESP_LOGD(TAG, "Busy pin activated");
+    }
+  }
     ~BusyGuard() { if (pin) pin->digital_write(false); }
   };
 
