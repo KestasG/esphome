@@ -162,7 +162,11 @@ protected:
       ESP_LOGD("pn532_spiK", "Busy pin activated");
     }
   }
-    ~BusyGuard() { if (pin) pin->digital_write(false); }
+    ~BusyGuard() { if (pin) {
+      pin->digital_write(false);
+       ESP_LOGD("pn532_spiK", "Busy pin deactivated");
+    }
+   }
   };
 
   void init_busy_pin_();
