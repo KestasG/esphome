@@ -21,7 +21,7 @@ CONFIG_SCHEMA = cv.All(
         {
             cv.GenerateID(): cv.declare_id(PN532Spi),
             cv.Optional(CONF_SALT): cv.string,
-            cv.Optional(CONF_BUSY_PIN): pins.gpio_input_pin_schema 
+            cv.Optional(CONF_BUSY_PIN): pins.gpio_output_pin_schema 
         }
     ).extend(spi.spi_device_schema(cs_pin_required=True))
 )
