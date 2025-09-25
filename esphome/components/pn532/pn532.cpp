@@ -112,9 +112,6 @@ void PN532::setup() {
     }
     this->error_code_ = SAM_COMMAND_FAILED;
     this->mark_failed();
-
-     this->init_busy_pin_();
-
     return;
   }
 
@@ -174,6 +171,10 @@ void PN532::setup() {
 
 
   this->turn_off_rf_();
+
+  this->init_busy_pin_();   
+
+  
   ESP_LOGV(TAG, "-----------------------------------PN532 SETUP FINISHED");
 }
 
