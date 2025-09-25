@@ -19,6 +19,8 @@ void PN532::init_busy_pin_() {
   if (this->busy_pin_ != nullptr) {
     this->busy_pin_->setup();              // respects YAML mode/inverted
     this->busy_pin_->digital_write(true); // idle = not busy
+    LOG_PIN("  Busy Pin: ", this->busy_pin_);
+    ESP_LOGD(TAG, "-----------------------Busy pin set to true ");
   }
 }
 
