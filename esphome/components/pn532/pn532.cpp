@@ -13,7 +13,7 @@
 namespace esphome {
 namespace pn532 {
 
-static const char *const TAG = "pn532";
+static const char *const TAG = "pn532K";
 
 void PN532::init_busy_pin_() {
   if (this->busy_pin_ != nullptr) {
