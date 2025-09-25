@@ -18,14 +18,11 @@ static const char *const TAG = "pn532K";
 void PN532::init_busy_pin_() {
   if (this->busy_pin_ != nullptr) {
     this->busy_pin_->setup();              // respects YAML mode/inverted
-    this->busy_pin_->digital_write(true); // idle = not busy
-    LOG_PIN("  Busy Pin: ", this->busy_pin_);
-    ESP_LOGD(TAG, "-----------------------Busy pin set to true ");
+    this->busy_pin_->digital_write(false); // idle = not busy    
   }
 }
 
-void PN532::setup() {
-  ESP_LOGD(TAG, "-----------------------STARTING SETUP");
+void PN532::setup() {  
   ESP_LOGCONFIG(TAG, "Setting up PN532...");
 
   // Get version data
@@ -167,15 +164,10 @@ void PN532::setup() {
 
     return;
   }
-
-
-
+  
   this->turn_off_rf_();
 
   this->init_busy_pin_();   
-
-  
-  ESP_LOGV(TAG, "-----------------------------------PN532 SETUP FINISHED");
 }
 
 bool PN532::powerdown() {
