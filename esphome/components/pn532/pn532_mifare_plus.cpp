@@ -448,7 +448,7 @@ works only with 255 bytes max length tag values.
 puts everything into flat map, does not keep tag structure relations.
 */
 
-void PN532::parseTags(std::vector<uint8_t> &ber_data, std::map<uint16_t, std:vector<uint8_t>> &tagMap) {
+void PN532::parseTags(std::vector<uint8_t> &ber_data, std::map<uint16_t, std::vector<uint8_t>> &tagMap) {
   // data must begin with tag
   uint8_t headerLen = 0;
   uint16_t tag = ber_data[headerLen++];
