@@ -148,6 +148,51 @@ static inline void make_ndef_text_message(const std::string &text, std::vector<u
   out.insert(out.end(), text.begin(), text.end());
 }
 
+// TLV helper used by parseTags()/findTag(); keeps the BER parsing logic in one place.
+struct TlvHeader {
+  uint16_t tag;
+  size_t length;
+  size_t header_len;  // number of bytes consumed by tag + length fields
+};
+
+static bool read_tlv_header_(const std::vector<uint8_t> &buffer, size_t offset, TlvHeader &out) {
+  if (offset >= buffer.size())
+    return false;
+
+  size_t cursor = offset;
+  uint16_t tag = buffer[cursor++];
+  if ((tag & 0x1F) == 0x1F) {
+    if (cursor >= buffer.size())
+      return false;
+    tag = static_cast<uint16_t>((tag << 8) | buffer[cursor++]);
+  }
+
+  if (cursor >= buffer.size())
+    return false;
+
+  uint8_t len_byte = buffer[cursor++];
+  size_t length = 0;
+  if (len_byte & 0x80) {
+    uint8_t count = len_byte & 0x7F;
+    if (count == 0 || cursor + count > buffer.size())
+      return false;
+    while (count--) {
+      length = (length << 8) | buffer[cursor++];
+    }
+  } else {
+    length = len_byte;
+  }
+
+  out = {tag, length, cursor - offset};
+  return true;
+}
+
+static inline bool is_emv_template_tag_(uint16_t tag) {
+  return tag == nfc::EMV_TAG_FCI_TEMPLATE || tag == nfc::EMV_TAG_FCI_PROPRIETARY_TEMPLATE ||
+         tag == nfc::EMV_TAG_FCI_ISSUER_DISCRETIONARY || tag == nfc::EMV_TAG_APPLICATION_TEMPLATE ||
+         tag == nfc::EMV_TAG_RESPONSE_TEMPLATE_FORMAT_2 || tag == nfc::EMV_TAG_RECORD_TEMPLATE;
+}
+
 // Compute salted SHA-256 of buf+salt and directly return as NDEF message
 static inline bool sha256_bytes_salted(const uint8_t *buf, size_t len,
                                        const std::string &salt,
@@ -260,7 +305,14 @@ static bool pan_from_tag5a_bcd_(const std::vector<uint8_t>& bcd, uint8_t digits[
 bool PN532::read_mifare_plus_bytes_(uint8_t start_page, uint16_t num_bytes, std::vector<uint8_t> &data) {
   std::vector<uint8_t> response;
 
-  //=========================== read file (PPSE)
+  // EMV contactless flow (simplified for read-only use):
+  //   1. SELECT the PPSE directory (2PAY.SYS.DDF01) to learn which payment application AID to use.
+  //   2. SELECT the returned AID to retrieve the application descriptor and Processing Options Data Object List (PDOL).
+  //   3. Build the PDOL payload and issue GET PROCESSING OPTIONS (GPO) to obtain the Application File Locator (AFL).
+  //   4. Walk the AFL entries, READ RECORD for each and extract Track / PAN data.
+  // Every APDU is retried a few times: real cards are timing sensitive and intermittently reject requests.
+
+  // Step 1: SELECT PPSE (2PAY.SYS.DDF01) to find the payment application directory.
   std::vector<uint8_t> apdu = {
     0x00, 0xa4, 0x04, 0x00,
     0x0e,
@@ -278,7 +330,7 @@ bool PN532::read_mifare_plus_bytes_(uint8_t start_page, uint16_t num_bytes, std:
   }
   ESP_LOGD(TAG, "Found ADF name: %s", format_hex_pretty(adf_name).c_str());
 
-  //============================== select application
+  // Step 2: SELECT the specific application using the AID discovered above.
   apdu = {0x00, 0xa4, 0x04, 0x00};
   apdu.push_back(adf_name.size());
   apdu.insert(std::end(apdu), std::begin(adf_name), std::end(adf_name));
@@ -288,9 +340,9 @@ bool PN532::read_mifare_plus_bytes_(uint8_t start_page, uint16_t num_bytes, std:
   if (!sendAPDU(apdu, response)) {
     ESP_LOGD(TAG, "Sending request to select application and get PDOL #2");
     if (!sendAPDU(apdu, response)) {
-      ESP_LOGD(TAG, "Sending request to selct application and get PDOL #3");
+      ESP_LOGD(TAG, "Sending request to select application and get PDOL #3");
       if (!sendAPDU(apdu, response)) {
-        ESP_LOGD(TAG, "Failed request to selct application and get PDOL. Givinig up.");
+        ESP_LOGD(TAG, "Failed request to select application and get PDOL. Giving up.");
         return false;
       }
     }
@@ -299,7 +351,7 @@ bool PN532::read_mifare_plus_bytes_(uint8_t start_page, uint16_t num_bytes, std:
   auto pdol = findTag(response, nfc::EMV_TAG_PDOL);
   ESP_LOGD(TAG, "Found PDOL: %s", format_hex_pretty(pdol).c_str());
 
-  //=========================== GPO (AIP/AFL)
+  // Step 3: Issue GET PROCESSING OPTIONS with a PDOL payload to obtain AIP/AFL.
   apdu = {0x80, 0xa8, 0x00, 0x00};
   auto pdol_data = constructPdolData(pdol);
   apdu.push_back(pdol_data.size() + 2);
@@ -314,7 +366,7 @@ bool PN532::read_mifare_plus_bytes_(uint8_t start_page, uint16_t num_bytes, std:
     if (!sendAPDU(apdu, response)) {
       ESP_LOGD(TAG, "Sending request for AFL retry #2");
       if (!sendAPDU(apdu, response)) {
-        ESP_LOGD(TAG, "Sending request for AFL failes 3 times. Giving up.");
+        ESP_LOGD(TAG, "Sending request for AFL failed 3 times. Giving up.");
         return false;
       }
     }
@@ -336,8 +388,8 @@ bool PN532::read_mifare_plus_bytes_(uint8_t start_page, uint16_t num_bytes, std:
     }
   }
 
-  //=========================== READ RECORDS via AFL ---------------------------
-  auto afl = findTag(response, 0x94);
+  // Step 4: Follow the AFL to READ RECORD entries and harvest account data.
+  auto afl = findTag(response, nfc::EMV_TAG_AFL);
   ESP_LOGD(TAG, "Found AFL: %s", format_hex_pretty(afl).c_str());
   if (afl.size() < 4 || (afl.size() % 4) != 0) {
     ESP_LOGW(TAG, "Invalid AFL found: %s", format_hex_pretty(afl).c_str());
@@ -346,17 +398,18 @@ bool PN532::read_mifare_plus_bytes_(uint8_t start_page, uint16_t num_bytes, std:
 
   uint8_t pos = 0;
   while (pos + 3 < afl.size()) {
+    // AFL entries are 4 bytes: [SFI|0x04][first record][last record][offline auth info].
     uint8_t sfi_byte = afl[pos++];
     uint8_t start = afl[pos++];
     uint8_t end   = afl[pos++];
     (void)afl[pos++]; // auth_rec not needed here
-    uint8_t sfi = (sfi_byte & 0b11111000) | 0b00000100;
+    uint8_t sfi = (sfi_byte & 0b11111000) | 0b00000100;  // Move SFI into READ RECORD P2 format.
 
     while (start <= end) {
       apdu = {0x00, 0xb2, start, sfi, 0x00};
       ESP_LOGD(TAG, "Sending SFI read request");
       if (sendAPDU(apdu, response)) {
-
+        // Try the EMV data elements in order of fidelity: Track-2 equivalent, Track-1, then PAN.
         // ---- Try 9F6B (Track-2 equiv, BCD nibbles) -------------------------
         auto t2 = findTag(response, nfc::EMV_TAG_TRACK2);
         if (!t2.empty()) {
@@ -397,7 +450,7 @@ bool PN532::read_mifare_plus_bytes_(uint8_t start_page, uint16_t num_bytes, std:
         ESP_LOGD(TAG, "Failed SFI read request");
       }
       start++;
-      yield();
+      yield();  // Allow the ESPHome scheduler to run between APDU bursts.
     }
   }
 
@@ -405,9 +458,9 @@ bool PN532::read_mifare_plus_bytes_(uint8_t start_page, uint16_t num_bytes, std:
   return false;
 }
 
-/*
-
-*/
+// Thin wrapper around the PN532 DATA EXCHANGE command. Converts higher level APDUs into the
+// PN532 framing, then strips the 0x00 status byte and SW1/SW2 trailer so the caller sees just the
+// application payload.
 bool PN532::sendAPDU(std::vector<uint8_t> &apdu, std::vector<uint8_t> &response) {
   // construct command
   std::vector<uint8_t> command({
@@ -417,10 +470,11 @@ bool PN532::sendAPDU(std::vector<uint8_t> &apdu, std::vector<uint8_t> &response)
   command.insert(command.end(), apdu.begin(), apdu.end());
 
   if (!this->write_command_(command)) {
-    ESP_LOGW(TAG, "write commande from sendAPDU failed");
+    ESP_LOGW(TAG, "write command from sendAPDU failed");
     return false;
   }
 
+  // PN532 prepends a status byte (0x00 == success) before the APDU payload.
   if (!this->read_response(PN532_COMMAND_INDATAEXCHANGE, response) || response[0] != 0x00) {
     ESP_LOGW(TAG, "read response from sendAPDU failed");    
     return false;    
@@ -433,160 +487,135 @@ bool PN532::sendAPDU(std::vector<uint8_t> &apdu, std::vector<uint8_t> &response)
     ESP_LOGW(TAG, "APDU command returned error: %s", format_hex(&response.data()[response.size() - 2], 2).c_str());
     return false;
   }
-  // remove technical bytes for easier further processing
-  // first byte is 0x00
-  // last two bytes response code
+  // Remove PN532 framing: drop leading status byte and trailing SW1/SW2 status words.
   response = {response.begin() + 1, response.end() - 2};
   return true;
 }
 
-/*
-simplified for BER-TLV parsing
-assumes data starts with tag
-works only with 1 and 2 byte tags
-works only with 255 bytes max length tag values.
-puts everything into flat map, does not keep tag structure relations.
-*/
-
+// Simplified BER-TLV parser used for EMV responses. The output map stores one copy of every tag's
+// value while template tags (FCI, record templates, etc.) are walked recursively.
 void PN532::parseTags(std::vector<uint8_t> &ber_data, std::map<uint16_t, std::vector<uint8_t>> &tagMap) {
-  // data must begin with tag
-  uint8_t headerLen = 0;
-  uint16_t tag = ber_data[headerLen++];
+  size_t cursor = 0;
+  while (cursor < ber_data.size()) {
+    TlvHeader header;
+    if (!read_tlv_header_(ber_data, cursor, header))
+      break;
 
-  if ((tag & 0x1F) == 0x1F)  // means we have multibyte tag
-  {
-    tag = (tag << 8) + ber_data[headerLen++];
-  }
+    size_t value_start = cursor + header.header_len;
+    if (value_start > ber_data.size() || value_start + header.length > ber_data.size())
+      break;
 
-  uint16_t len = ber_data[headerLen++];
-  if (ber_data.size() > len + headerLen) {
-    // the tag does not cover full vector, remainder needs to be parsed recursivelly
-    std::vector<uint8_t> remainingData = {ber_data.begin() + headerLen + len,
-                                          ber_data.end()};  // skip tag and len bytes in begining
-    parseTags(remainingData, tagMap);
-  }
+    std::vector<uint8_t> tag_value(ber_data.begin() + value_start,
+                                   ber_data.begin() + value_start + header.length);
 
-  // safety check before vector operation
-  if (ber_data.size() >= len + headerLen) {
-    std::vector<uint8_t> tagValue = {ber_data.begin() + headerLen, ber_data.begin() + headerLen + len};
-    //tagMap.insert(std::pair<uint16_t, uint8_t *>(tag, tagValue.data()));
-    tagMap.insert(std::make_pair(tag, std::vector<uint8_t>(tagValue.begin(), tagValue.end())));
-    // if the tag is template tag, need to parse contents recursivelly
-    if (tag == 0x6F || tag == 0xA5 || tag == 0xBF0C || tag == 0x61) {
-      parseTags(tagValue, tagMap);
+    auto inserted = tagMap.insert(std::make_pair(header.tag, tag_value));
+    if (!inserted.second) {
+      inserted.first->second = tag_value;
     }
+
+    if (is_emv_template_tag_(header.tag)) {
+      parseTags(tag_value, tagMap);
+    }
+
+    cursor = value_start + header.length;
   }
 }
 
-std::vector<uint8_t> PN532::constructPdolData(std::vector<uint8_t> &pdol) {
-  if (pdol.size() < 2)  // we never shoudl get size() ==1, but just to catch some invalid cases
+// Builds the PDOL data payload used in the GET PROCESSING OPTIONS command. PDOL (9F38) is encoded
+// as a sequence of tag-length descriptors (no values), so we synthesise plausible defaults for the
+// most common tags and pad with zeroes for everything else.
+std::vector<uint8_t> PN532::constructPdolData(const std::vector<uint8_t> &pdol) {
+  if (pdol.size() < 2)
     return {};
 
   std::vector<uint8_t> result;
-  while (pdol.size() > 1) {
-    uint8_t headerLen = 0;
-    uint16_t tag = pdol[headerLen++];
+  size_t cursor = 0;
+  while (cursor < pdol.size()) {
+    if (cursor >= pdol.size())
+      break;
 
-    if ((tag & 0x1F) == 0x1F)  // means we have multibyte tag
-    {
-      tag = (tag << 8) + pdol[headerLen++];
+    uint16_t tag = pdol[cursor++];
+    if ((tag & 0x1F) == 0x1F) {
+      if (cursor >= pdol.size())
+        break;
+      tag = static_cast<uint16_t>((tag << 8) + pdol[cursor++]);
     }
-    uint16_t len = pdol[headerLen++];
-    std::vector<uint8_t> tagValue(0);
 
-    switch (tag) {  // generate meaningful values for known tags
-      case 0x9F66:  //	Terminal Transaction Qualifiers (TTQ)
-/*        tagValue = {
-            0x36, 0xA0, 0x40,
-            0x00};  // https://mstcompany.net/blog/acquiring-emv-transaction-flow-part-4-pdol-and-contactless-cards-characteristic-features-of-qvsdc-and-quics
-            */
-            tagValue = {
-            0xF0, 0x20, 0x40,
-            0x00};  // https://stackoverflow.com/questions/55337693/generate-get-processing-options-gpo-for-emv-card-apdu-by-pdol
+    if (cursor >= pdol.size())
+      break;
+    uint8_t len = pdol[cursor++];
+
+    std::vector<uint8_t> tag_value;
+    switch (tag) {
+      case 0x9F66:  // Terminal Transaction Qualifiers (capabilities advertised by reader)
+        tag_value = {0xF0, 0x20, 0x40, 0x00};
         break;
-      case 0x9F02:  //	Amount, Authorised (Numeric)
-      case 0x9F03:  // Amount, Other (Numeric)
-        tagValue = {0x00, 0x00, 0x00, 0x00, 0x10, 0x00};
+      case 0x9F02:  // Amount, Authorised (Numeric) – purchase amount in minor units
+      case 0x9F03:  // Amount, Other (Numeric) – cashback amount, rarely used here
+        tag_value = {0x00, 0x00, 0x00, 0x00, 0x10, 0x00};
         break;
-      case 0x9F1A:                // Terminal Country Code https://www.iban.com/country-codes
-        tagValue = {0x02, 0x76};  // Germany
+      case 0x9F1A:  // Terminal Country Code (ISO numeric)
+        tag_value = {0x02, 0x76};  // Germany (276)
         break;
-      case 0x5F2A:                // Transaction Currency Code https://www.iban.com/currency-codes
-        tagValue = {0x09, 0x78};  // EUR
+      case 0x5F2A:  // Transaction Currency Code (ISO numeric)
+        tag_value = {0x09, 0x78};  // EUR (978)
         break;
-      case 0x9A:   // Transaction Date (YYMMDD)
+      case 0x9A: {  // Transaction Date (YYMMDD)
         ESPTime now = ESPTime::from_epoch_local(::time(nullptr));
-        tagValue.push_back(static_cast<uint8_t>((now.year - 2000) & 0xFF));
-        tagValue.push_back(static_cast<uint8_t>(now.month));
-        tagValue.push_back(static_cast<uint8_t>(now.day_of_month));      
-      /*  tagValue = {
-            0x23,
-            0x11,
-            0x25,
-        };*/
+        tag_value.push_back(static_cast<uint8_t>((now.year - 2000) & 0xFF));
+        tag_value.push_back(static_cast<uint8_t>(now.month));
+        tag_value.push_back(static_cast<uint8_t>(now.day_of_month));
         break;
-
-      case 0x9F37:  // Unpredictable Number (UN)
-        tagValue = {0xB5, 0x43, 0xFF, 0x89};
+      }
+      case 0x9F37:  // Unpredictable Number (nonce supplied by terminal)
+        tag_value = {0xB5, 0x43, 0xFF, 0x89};
         break;
-      default:  // generate zeroes
-        tagValue.resize(len, 0);
+      default:
+        // Unknown tags get zero padding; this keeps the GPO payload structurally valid.
+        tag_value.resize(len, 0x00);
+        break;
     }
-    result.insert(result.end(), tagValue.begin(), tagValue.end());
-    pdol.erase(pdol.begin(), pdol.begin() + headerLen);
+
+    if (tag_value.size() < len) {
+      tag_value.resize(len, 0x00);
+    } else if (tag_value.size() > len) {
+      tag_value.resize(len);
+    }
+
+    result.insert(result.end(), tag_value.begin(), tag_value.end());
   }
+
   return result;
 }
 
+// Depth-first search for a specific tag inside a BER-TLV buffer. Template tags are traversed to
+// mirror the nesting used by EMV records (FCI, record template, discretionary templates, ...).
 std::vector<uint8_t> PN532::findTag(std::vector<uint8_t> &ber_data, uint16_t tagToFind) {
-  // ber must have at least 3 bytes - tag, length and value
-  if (ber_data.size() < 3)
-    return {};
+  size_t cursor = 0;
+  while (cursor < ber_data.size()) {
+    TlvHeader header;
+    if (!read_tlv_header_(ber_data, cursor, header))
+      return {};
 
-  // data must begin with tag
-  uint8_t headerLen = 0;
-  uint16_t tag = ber_data[headerLen++];
+    size_t value_start = cursor + header.header_len;
+    if (value_start > ber_data.size() || value_start + header.length > ber_data.size())
+      return {};
 
-  if ((tag & 0x1F) == 0x1F)  // means we have multibyte tag
-  {
-    tag = (tag << 8) + ber_data[headerLen++];
-  }
-  //uint8_t len = ber_data[headerLen++];
-  //if(len & 0b10000000) //if bit 8 is set, lenghts should be read from next byte
-  //  len = ber_data[headerLen++];
-  //read leangth
-  uint8_t len_byte = ber_data[headerLen++];
-  size_t len = 0;
-  if (len_byte & 0x80) {
-    uint8_t count = len_byte & 0x7F;
-    while (count-- && headerLen < ber_data.size()) {
-      len = (len << 8) | ber_data[headerLen++];
+    std::vector<uint8_t> tag_value(ber_data.begin() + value_start,
+                                   ber_data.begin() + value_start + header.length);
+
+    if (header.tag == tagToFind) {
+      return tag_value;
     }
-  } else {
-    len = len_byte;
-  }
-  // safety check before vector operation
-  if (ber_data.size() >= len + headerLen) {
-    std::vector<uint8_t> tagValue = {ber_data.begin() + headerLen, ber_data.begin() + headerLen + len};
-    if (tag == tagToFind)
-      return tagValue;
-    // if the tag is template tag, need to parse contents recursivelly
-    if (tag == 0x6F || tag == 0xA5 || tag == 0xBF0C || tag == 0x61 || tag == 0x77 || tag == 0x70) {
-      tagValue = findTag(tagValue, tagToFind);
-      if (!tagValue.empty()) {
-        return tagValue;
+
+    if (is_emv_template_tag_(header.tag)) {
+      auto nested = findTag(tag_value, tagToFind);
+      if (!nested.empty()) {
+        return nested;
       }
     }
-  }
 
-  // the tag does not cover full vector, remainder needs to be parsed recursivelly
-  if (ber_data.size() > len + headerLen) {
-    std::vector<uint8_t> remainingData = {ber_data.begin() + headerLen + len,
-                                          ber_data.end()};  // skip tag and len bytes in begining
-    std::vector<uint8_t> tagValue = findTag(remainingData, tagToFind);
-    if (!tagValue.empty()) {
-      return tagValue;
-    }
+    cursor = value_start + header.length;
   }
   return {};
 }

@@ -127,7 +127,7 @@ class PN532 : public PollingComponent {
   bool sendAPDU(std::vector<uint8_t> &apdu, std::vector<uint8_t> &aresponse);
   void parseTags(std::vector<uint8_t> &ber_data, std::map<uint16_t, std::vector<uint8_t>> &tagMap);
   std::vector<uint8_t> findTag(std::vector<uint8_t> &ber_data, uint16_t tagToFind);
-  std::vector<uint8_t> constructPdolData(std::vector<uint8_t> &pdol);
+  std::vector<uint8_t> constructPdolData(const std::vector<uint8_t> &pdol);
   
 
   bool updates_enabled_{true};
@@ -209,3 +209,4 @@ template<typename... Ts> class PN532IsWritingCondition : public Condition<Ts...>
 
 }  // namespace pn532
 }  // namespace esphome
+
