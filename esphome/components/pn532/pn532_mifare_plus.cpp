@@ -448,7 +448,7 @@ works only with 255 bytes max length tag values.
 puts everything into flat map, does not keep tag structure relations.
 */
 
-void PN532::parseTags(std::vector<uint8_t> &ber_data, std::map<uint16_t, uint8_t *> &tagMap) {
+void PN532::parseTags(std::vector<uint8_t> &ber_data, std::map<uint16_t, std:vector<uint8_t>> &tagMap) {
   // data must begin with tag
   uint8_t headerLen = 0;
   uint16_t tag = ber_data[headerLen++];
@@ -469,7 +469,8 @@ void PN532::parseTags(std::vector<uint8_t> &ber_data, std::map<uint16_t, uint8_t
   // safety check before vector operation
   if (ber_data.size() >= len + headerLen) {
     std::vector<uint8_t> tagValue = {ber_data.begin() + headerLen, ber_data.begin() + headerLen + len};
-    tagMap.insert(std::pair<uint16_t, uint8_t *>(tag, tagValue.data()));
+    //tagMap.insert(std::pair<uint16_t, uint8_t *>(tag, tagValue.data()));
+    tagMap.insert(std::make_pair(tag, std::vector<uint8_t>(tagValue.begin(), tagValue.end())));
     // if the tag is template tag, need to parse contents recursivelly
     if (tag == 0x6F || tag == 0xA5 || tag == 0xBF0C || tag == 0x61) {
       parseTags(tagValue, tagMap);
@@ -513,17 +514,16 @@ std::vector<uint8_t> PN532::constructPdolData(std::vector<uint8_t> &pdol) {
       case 0x5F2A:                // Transaction Currency Code https://www.iban.com/currency-codes
         tagValue = {0x09, 0x78};  // EUR
         break;
-      case 0x9A: {  // Transaction Date (YYMMDD)
+      case 0x9A:   // Transaction Date (YYMMDD)
         ESPTime time_ = ESPTime::from_epoch_local(::time(nullptr));
-        //  tagValue.push_back(time_.year-2000);
-        //  tagValue.push_back(time_.month);
-        //  tagValue.push_back(time_.day_of_month);
-      }
-        tagValue = {
+        tag_value.push_back(static_cast<uint8_t>((now.year - 2000) & 0xFF));
+        tag_value.push_back(static_cast<uint8_t>(now.month));
+        tag_value.push_back(static_cast<uint8_t>(now.day_of_month));      
+      /*  tagValue = {
             0x23,
             0x11,
             0x25,
-        };
+        };*/
         break;
 
       case 0x9F37:  // Unpredictable Number (UN)
@@ -551,9 +551,20 @@ std::vector<uint8_t> PN532::findTag(std::vector<uint8_t> &ber_data, uint16_t tag
   {
     tag = (tag << 8) + ber_data[headerLen++];
   }
-  uint8_t len = ber_data[headerLen++];
-  if(len & 0b10000000) //if bit 8 is set, lenghts should be read from next byte
-    len = ber_data[headerLen++];
+  //uint8_t len = ber_data[headerLen++];
+  //if(len & 0b10000000) //if bit 8 is set, lenghts should be read from next byte
+  //  len = ber_data[headerLen++];
+  //read leangth
+  uint8_t len_byte = ber_data[headerLen++];
+  size_t len = 0;
+  if (len_byte & 0x80) {
+    uint8_t count = len_byte & 0x7F;
+    while (count-- && headerLen < ber_data.size()) {
+      len = (len << 8) | ber_data[headerLen++];
+    }
+  } else {
+    len = len_byte;
+  }
   // safety check before vector operation
   if (ber_data.size() >= len + headerLen) {
     std::vector<uint8_t> tagValue = {ber_data.begin() + headerLen, ber_data.begin() + headerLen + len};

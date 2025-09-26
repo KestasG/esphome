@@ -125,7 +125,7 @@ class PN532 : public PollingComponent {
   bool read_mifare_plus_bytes_(uint8_t start_page, uint16_t num_bytes, std::vector<uint8_t> &data);
   bool is_mifare_plus_formatted_(const std::vector<uint8_t> &page_3_to_6);
   bool sendAPDU(std::vector<uint8_t> &apdu, std::vector<uint8_t> &aresponse);
-  void parseTags(std::vector<uint8_t> &ber_data, std::map<uint16_t, uint8_t*> &tagMap);
+  void parseTags(std::vector<uint8_t> &ber_data, std::map<uint16_t, std:vector<uint8_t>> &tagMap);
   std::vector<uint8_t> findTag(std::vector<uint8_t> &ber_data, uint16_t tagToFind);
   std::vector<uint8_t> constructPdolData(std::vector<uint8_t> &pdol);
   
