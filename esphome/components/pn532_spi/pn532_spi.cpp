@@ -94,7 +94,7 @@ bool PN532Spi::read_response(uint8_t command, std::vector<uint8_t> &data) {
     //ESP_LOGV(TAG, "Not ready yet...");    
 
     if (millis() - start_time > 150) {
-      //ESP_LOGV(TAG, "Timed out waiting for readiness from PN532!");
+      ESP_LOGW(TAG, "SPI read_response timed out after %u ms (rd_ready_=%d)", millis() - start_time, this->rd_ready_);
       return false;
     }
     //delay(2);
