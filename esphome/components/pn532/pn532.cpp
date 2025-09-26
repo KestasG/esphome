@@ -213,6 +213,7 @@ void PN532::update() {
 }
 
 void PN532::loop() {
+  ESP_LOGV("pn532.debug", "loop(): rd_ready_=%d requested_read_=%d", this->rd_ready_, this->requested_read_);
   if (!this->requested_read_)
     return;
 
