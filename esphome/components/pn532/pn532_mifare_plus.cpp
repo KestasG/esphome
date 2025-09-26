@@ -515,10 +515,10 @@ std::vector<uint8_t> PN532::constructPdolData(std::vector<uint8_t> &pdol) {
         tagValue = {0x09, 0x78};  // EUR
         break;
       case 0x9A:   // Transaction Date (YYMMDD)
-        ESPTime time_ = ESPTime::from_epoch_local(::time(nullptr));
-        tag_value.push_back(static_cast<uint8_t>((now.year - 2000) & 0xFF));
-        tag_value.push_back(static_cast<uint8_t>(now.month));
-        tag_value.push_back(static_cast<uint8_t>(now.day_of_month));      
+        ESPTime now = ESPTime::from_epoch_local(::time(nullptr));
+        tagValue.push_back(static_cast<uint8_t>((now.year - 2000) & 0xFF));
+        tagValue.push_back(static_cast<uint8_t>(now.month));
+        tagValue.push_back(static_cast<uint8_t>(now.day_of_month));      
       /*  tagValue = {
             0x23,
             0x11,
