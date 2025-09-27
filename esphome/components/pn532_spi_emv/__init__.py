@@ -5,7 +5,7 @@ from esphome.const import CONF_ID
 
 CONF_SALT = "salt"
 
-AUTO_LOAD = ["pn532_spi"]
+AUTO_LOAD = ["pn532", "pn532_spi"] 
 CODEOWNERS = ["@OttoWinter", "@jesserockz"]
 DEPENDENCIES = ["spi"]
 MULTI_CONF = True
