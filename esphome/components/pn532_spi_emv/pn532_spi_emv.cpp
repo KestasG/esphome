@@ -178,6 +178,8 @@ bool PN532SpiEmv::read_response(uint8_t command, std::vector<uint8_t> &data) {
   if (this->read_ready_(true) != pn532::PN532ReadReady::READY)
     return false;
 
+  ESP_LOGV(TAG, "read_response(): waiting for cmd 0x%02X", command);
+
   this->enable();
   delay(2);
   this->write_byte(0x03);
@@ -186,6 +188,7 @@ bool PN532SpiEmv::read_response(uint8_t command, std::vector<uint8_t> &data) {
   this->read_array(header.data(), header.size());
 
   ESP_LOGV(TAG, "Header data: %s", format_hex_pretty(header).c_str());
+  ESP_LOGV(TAG, "header len bytes: [%02X %02X]", header[3], header[4]);
 
   if (header[0] != 0x00 && header[1] != 0x00 && header[2] != 0xFF)
     return false;
@@ -198,13 +201,13 @@ bool PN532SpiEmv::read_response(uint8_t command, std::vector<uint8_t> &data) {
 
   uint8_t full_len = header[3];
   uint8_t len = (full_len == 0) ? 0 : full_len - 1;
+  ESP_LOGV(TAG, "full_len=%u len=%u", full_len, len);
 
-  if (len  == 0) {
+  if (len == 0) {
+    ESP_LOGW(TAG, "read_response(): zero-length payload for cmd 0x%02X", command);
     this->disable();
     return false;
   }
-
-  
 
   data.resize(len + 1);
   this->read_array(data.data(), len + 1);
@@ -233,6 +236,8 @@ bool PN532SpiEmv::send_apdu_(const std::vector<uint8_t> &apdu, std::vector<uint8
   command.push_back(pn532::PN532_COMMAND_INDATAEXCHANGE);
   command.push_back(0x01);
   command.insert(command.end(), apdu.begin(), apdu.end());
+
+  ESP_LOGV(TAG, "send_apdu_: %s", format_hex_pretty(command).c_str());
 
   if (!this->write_command_(command))
     return false;
