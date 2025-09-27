@@ -4,7 +4,6 @@
 #include "esphome/components/pn532/pn532.h"
 #include "esphome/components/spi/spi.h"
 
-
 #include <vector>
 
 namespace esphome {
