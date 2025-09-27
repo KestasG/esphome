@@ -108,10 +108,25 @@ void PN532SpiEmv::set_busy_pin(GPIOPin *pin) {
   }
 }
 
+// Prefer EMV flow only for cards reporting SAK 0x20 (PICC compliant with EMV contactless).
+// Otherwise fall back to the default PN532 handling.
 std::unique_ptr<nfc::NfcTag> PN532SpiEmv::read_tag_(std::vector<uint8_t> &uid) {
-  auto tag = pn532::PN532::read_tag_(uid);
-  if (!tag)
-    tag = std::make_unique<nfc::NfcTag>(uid);
+  const bool sak_valid = this->last_sak_valid_;
+  const uint8_t sak = this->last_sak_;
+  this->last_sak_valid_ = false;
+
+  auto base_tag = pn532::PN532::read_tag_(uid);
+  if (!base_tag)
+    base_tag = std::make_unique<nfc::NfcTag>(uid);
+
+  if (!sak_valid || sak != 0x20) {
+    if (sak_valid) {
+      ESP_LOGV(TAG, "SAK 0x%02X indicates non-EMV card; using default PN532 flow", sak);
+    } else {
+      ESP_LOGV(TAG, "SAK not available; using default PN532 flow");
+    }
+    return base_tag;
+  }
 
   struct BusyGuard {
     explicit BusyGuard(GPIOPin *pin) : pin(pin) {
@@ -126,16 +141,11 @@ std::unique_ptr<nfc::NfcTag> PN532SpiEmv::read_tag_(std::vector<uint8_t> &uid) {
   } guard(this->busy_pin_);
 
   auto emv_tag = this->read_emv_tag_(uid);
-  if (!emv_tag || !emv_tag->has_ndef_message())
-    return tag;
+  if (emv_tag && emv_tag->has_ndef_message())
+    return emv_tag;
 
-  const auto &message = emv_tag->get_ndef_message();
-  if (message == nullptr)
-    return tag;
-
-  auto ndef_copy = std::make_unique<nfc::NdefMessage>(*message);
-  tag->set_ndef_message(std::move(ndef_copy));
-  return tag;
+  ESP_LOGW(TAG, "EMV parsing failed; falling back to default PN532 tag handling");
+  return base_tag;
 }
 
 bool PN532SpiEmv::is_read_ready() {
@@ -177,6 +187,9 @@ bool PN532SpiEmv::read_data(std::vector<uint8_t> &data, uint8_t len) {
 bool PN532SpiEmv::read_response(uint8_t command, std::vector<uint8_t> &data) {
   if (this->read_ready_(true) != pn532::PN532ReadReady::READY)
     return false;
+
+  if (command == pn532::PN532_COMMAND_INLISTPASSIVETARGET)
+    this->last_sak_valid_ = false;
 
   ESP_LOGV(TAG, "read_response(): waiting for cmd 0x%02X", command);
 
@@ -227,6 +240,18 @@ bool PN532SpiEmv::read_response(uint8_t command, std::vector<uint8_t> &data) {
     return false;
 
   data.erase(data.end() - 2, data.end());
+
+  if (command == pn532::PN532_COMMAND_INLISTPASSIVETARGET) {
+    if (data.size() >= 6) {
+      this->last_sak_ = data[4];
+      this->last_sak_valid_ = true;
+      ESP_LOGV(TAG, "Captured SAK 0x%02X from InListPassiveTarget", this->last_sak_);
+    } else {
+      this->last_sak_valid_ = false;
+      ESP_LOGW(TAG, "InListPassiveTarget payload too short (%u bytes)", static_cast<unsigned>(data.size()));
+    }
+  }
+
   return true;
 }
 

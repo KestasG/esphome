@@ -41,8 +41,6 @@ class PN532SpiEmv : public pn532::PN532,
 
   GPIOPin *busy_pin_{nullptr};
   std::string salt_{"esphome_pn532"};
-  uint8_t last_sak_{0};
-  bool last_sak_valid_{false};
 };
 
 }  // namespace pn532_spi_emv
