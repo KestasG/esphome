@@ -418,24 +418,19 @@ bool PN532SpiEmv::build_hashed_pan_ndef_(const std::vector<uint8_t> &digits, std
   if (digits.size() < 8 || digits.size() > 19)
     return false;
 
-  std::string pan;
-  pan.reserve(digits.size());
-  for (uint8_t d : digits)
-    pan.push_back(static_cast<char>('0' + d));
-
   uint8_t digest[32];
   mbedtls_sha256_context ctx;
   mbedtls_sha256_init(&ctx);
 #if defined(mbedtls_sha256_starts_ret)
   mbedtls_sha256_starts_ret(&ctx, 0);
-  mbedtls_sha256_update_ret(&ctx, reinterpret_cast<const unsigned char *>(pan.data()), pan.size());
+  mbedtls_sha256_update_ret(&ctx, digits.data(), digits.size());
   if (!this->salt_.empty())
     mbedtls_sha256_update_ret(&ctx, reinterpret_cast<const unsigned char *>(this->salt_.data()),
                               this->salt_.size());
   mbedtls_sha256_finish_ret(&ctx, digest);
 #else
   mbedtls_sha256_starts(&ctx, 0);
-  mbedtls_sha256_update(&ctx, reinterpret_cast<const unsigned char *>(pan.data()), pan.size());
+  mbedtls_sha256_update(&ctx, digits.data(), digits.size());
   if (!this->salt_.empty())
     mbedtls_sha256_update(&ctx, reinterpret_cast<const unsigned char *>(this->salt_.data()),
                           this->salt_.size());
