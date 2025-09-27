@@ -5,9 +5,9 @@ from esphome.const import CONF_ID
 
 CONF_SALT = "salt"
 
-AUTO_LOAD = ["pn532"]
+AUTO_LOAD = ["pn532_spi"]
 CODEOWNERS = ["@OttoWinter", "@jesserockz"]
-DEPENDENCIES = ["pn532_spi"]
+DEPENDENCIES = ["spi"]
 MULTI_CONF = True
 
 pn532_spi_emv_ns = cg.esphome_ns.namespace("pn532_spi_emv")
