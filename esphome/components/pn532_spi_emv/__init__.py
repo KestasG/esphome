@@ -4,7 +4,7 @@ from esphome.components import pn532, spi, pn532_spi   # <-- import base
 from esphome.const import CONF_ID
 from esphome import pins
 
-AUTO_LOAD = ["pn532", "pn532_spi"]   # <-- pull in the base component
+AUTO_LOAD = ["pn532"]   # <-- pull in the base component
 CODEOWNERS = ["@OttoWinter", "@jesserockz"]
 DEPENDENCIES = ["spi"]               # only depends on SPI bus
 MULTI_CONF = True
