@@ -1,31 +1,39 @@
 import esphome.codegen as cg
+from esphome.components import pn532, spi
 import esphome.config_validation as cv
-from esphome.components import pn532, spi, pn532_spi   # <-- import base
 from esphome.const import CONF_ID
 from esphome import pins
 
-AUTO_LOAD = ["pn532"]   # <-- pull in the base component
+CONF_SALT = "salt"
+CONF_BUSY_PIN = "busy_pin"
+
+AUTO_LOAD = ["pn532"]
 CODEOWNERS = ["@OttoWinter", "@jesserockz"]
-DEPENDENCIES = ["spi"]               # only depends on SPI bus
+DEPENDENCIES = ["spi"]
 MULTI_CONF = True
 
 pn532_spi_emv_ns = cg.esphome_ns.namespace("pn532_spi_emv")
-PN532SpiEMV = pn532_spi_emv_ns.class_("PN532SpiEMV", pn532_spi.PN532Spi)
+PN532SpiEmv = pn532_spi_emv_ns.class_("PN532SpiEmv", pn532.PN532, spi.SPIDevice)
 
 CONFIG_SCHEMA = cv.All(
-    pn532.PN532_SCHEMA.extend({
-        cv.GenerateID(): cv.declare_id(PN532SpiEMV),
-        cv.Optional("salt"): cv.string,
-        cv.Optional("busy_pin"): pins.gpio_output_pin_schema,
-    }).extend(spi.spi_device_schema(cs_pin_required=True))
+    pn532.PN532_SCHEMA.extend(
+        {
+            cv.GenerateID(): cv.declare_id(PN532SpiEmv),
+            cv.Optional(CONF_SALT): cv.string,
+            cv.Optional(CONF_BUSY_PIN): pins.gpio_output_pin_schema,
+        }
+    ).extend(spi.spi_device_schema(cs_pin_required=True))
 )
+
 
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await pn532.setup_pn532(var, config)
     await spi.register_spi_device(var, config)
-    if "salt" in config:
-        cg.add(var.set_salt(config["salt"]))
-    if "busy_pin" in config:
-        pin = await cg.gpio_pin_expression(config["busy_pin"])
+
+    if CONF_SALT in config:
+        cg.add(var.set_salt(config[CONF_SALT]))
+
+    if CONF_BUSY_PIN in config:
+        pin = await cg.gpio_pin_expression(config[CONF_BUSY_PIN])
         cg.add(var.set_busy_pin(pin))

@@ -1,29 +1,41 @@
 #include "pn532_spi_emv.h"
 
 #include "esphome/components/nfc/nfc.h"
-#include "esphome/components/nfc/nfc_tag.h"
 #include "esphome/core/helpers.h"
-#include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 #include "esphome/core/time.h"
 
 #define MBEDTLS_CONFIG_FILE "mbedtls/esp_config.h"
 #include "mbedtls/sha256.h"
 
-#include <cctype>
 #include <cstdio>
 #include <ctime>
+#include <memory>
 
 namespace esphome {
 namespace pn532_spi_emv {
 
 static const char *const TAG = "pn532.spi_emv";
-static const uint8_t EMV_SAK_DESFIRE = 0x20;  // Common for DESFire / EMV contactless cards.
+static const uint8_t EMV_SFI_MASK = 0xF8;
+static const uint8_t EMV_SFI_READ_CMD_BITS = 0x04;
 
 struct TlvHeader {
   uint16_t tag;
   size_t length;
   size_t header_len;
+};
+
+class InternalOnTagTrigger : public nfc::NfcOnTagTrigger {
+ public:
+  explicit InternalOnTagTrigger(PN532SpiEmv *parent) : parent_(parent) {}
+
+  void process(const std::unique_ptr<nfc::NfcTag> &tag) override {
+    if (this->parent_ != nullptr)
+      this->parent_->handle_tag(tag);
+  }
+
+ private:
+  PN532SpiEmv *parent_{nullptr};
 };
 
 static bool parse_tlv_header(const std::vector<uint8_t> &buffer, size_t offset, TlvHeader &out) {
@@ -37,6 +49,7 @@ static bool parse_tlv_header(const std::vector<uint8_t> &buffer, size_t offset, 
       return false;
     tag = static_cast<uint16_t>((tag << 8) | buffer[cursor++]);
   }
+
   if (cursor >= buffer.size())
     return false;
 
@@ -46,7 +59,7 @@ static bool parse_tlv_header(const std::vector<uint8_t> &buffer, size_t offset, 
     uint8_t count = static_cast<uint8_t>(len_byte & 0x7F);
     if (count == 0 || cursor + count > buffer.size())
       return false;
-    while (count--) {
+    while (count-- != 0) {
       length = (length << 8) | buffer[cursor++];
     }
   } else {
@@ -72,180 +85,167 @@ static bool is_template_tag(uint16_t tag) {
 }
 
 static void make_ndef_text_message(const std::string &text, std::vector<uint8_t> &out) {
-  const char *type = "T";
-  const std::string lang = "en";
+  const std::string lang("en");
   const uint8_t status = static_cast<uint8_t>(lang.size() & 0x3F);
   const size_t payload_len = 1 + lang.size() + text.size();
 
   out.clear();
   out.reserve(3 + 1 + payload_len);
-  out.push_back(0xD1);  // MB|ME|SR|TNF=Well-known
-  out.push_back(0x01);  // type length
+  out.push_back(0xD1);
+  out.push_back(0x01);
   out.push_back(static_cast<uint8_t>(payload_len));
-  out.push_back(static_cast<uint8_t>(type[0]));
+  out.push_back('T');
   out.push_back(status);
   out.insert(out.end(), lang.begin(), lang.end());
   out.insert(out.end(), text.begin(), text.end());
 }
 
-void PN532SpiEmv::loop() {
-  if (!this->requested_read_)
+void PN532SpiEmv::setup() {
+  ESP_LOGV(TAG, "Setting up PN532 SPI EMV reader");
+  this->spi_setup();
+  this->cs_->digital_write(false);
+  delay(10);
+  pn532::PN532::setup();
+
+  this->internal_trigger_ = std::make_unique<InternalOnTagTrigger>(this);
+  this->register_ontag_trigger(this->internal_trigger_.get());
+}
+
+void PN532SpiEmv::dump_config() {
+  pn532::PN532::dump_config();
+  LOG_PIN("  CS Pin: ", this->cs_);
+}
+
+bool PN532SpiEmv::is_read_ready() {
+  this->enable();
+  this->write_byte(0x02);
+  bool ready = this->read_byte() == 0x01;
+  this->disable();
+  return ready;
+}
+
+bool PN532SpiEmv::write_data(const std::vector<uint8_t> &data) {
+  this->enable();
+  delay(2);
+  this->write_byte(0x01);
+  ESP_LOGV(TAG, "Writing data: %s", format_hex_pretty(data).c_str());
+  this->write_array(data.data(), data.size());
+  this->disable();
+  return true;
+}
+
+bool PN532SpiEmv::read_data(std::vector<uint8_t> &data, uint8_t len) {
+  if (this->read_ready_(true) != pn532::PN532ReadReady::READY)
+    return false;
+
+  this->enable();
+  delay(2);
+  this->write_byte(0x03);
+
+  ESP_LOGV(TAG, "Reading data");
+
+  data.resize(len);
+  this->read_array(data.data(), len);
+  this->disable();
+  data.insert(data.begin(), 0x01);
+  ESP_LOGV(TAG, "Read data: %s", format_hex_pretty(data).c_str());
+  return true;
+}
+
+bool PN532SpiEmv::read_response(uint8_t command, std::vector<uint8_t> &data) {
+  if (this->read_ready_(true) != pn532::PN532ReadReady::READY)
+    return false;
+
+  this->enable();
+  delay(2);
+  this->write_byte(0x03);
+
+  std::vector<uint8_t> header(7);
+  this->read_array(header.data(), header.size());
+
+  ESP_LOGV(TAG, "Header data: %s", format_hex_pretty(header).c_str());
+
+  if (header[0] != 0x00 && header[1] != 0x00 && header[2] != 0xFF)
+    return false;
+
+  bool valid_header = (static_cast<uint8_t>(header[3] + header[4]) == 0 && header[5] == 0xD5 &&
+                       (header[6] == command + 1 || header[6] == command));
+
+  if (!valid_header)
+    return false;
+
+  uint8_t full_len = header[3];
+  uint8_t len = (full_len == 0) ? 0 : full_len - 1;
+
+  data.resize(len + 1);
+  this->read_array(data.data(), len + 1);
+  this->disable();
+
+  ESP_LOGV(TAG, "Response data: %s", format_hex_pretty(data).c_str());
+
+  uint8_t checksum = header[5] + header[6];
+  for (int i = 0; i < len - 1; i++)
+    checksum += data[i];
+  checksum = ~checksum + 1;
+
+  if (data[len - 1] != checksum)
+    return false;
+
+  if (data[len] != 0x00)
+    return false;
+
+  data.erase(data.end() - 2, data.end());
+  return true;
+}
+
+void PN532SpiEmv::handle_tag(const std::unique_ptr<nfc::NfcTag> &tag) {
+  struct BusyGuard {
+    explicit BusyGuard(GPIOPin *pin) : pin_(pin) {
+      if (this->pin_ != nullptr)
+        this->pin_->digital_write(true);
+    }
+    ~BusyGuard() {
+      if (this->pin_ != nullptr)
+        this->pin_->digital_write(false);
+    }
+    GPIOPin *pin_;
+  } guard(this->busy_pin_);
+
+  auto hashed_tag = this->read_emv_tag_(tag->get_uid());
+  if (!hashed_tag)
     return;
 
-  auto ready = this->read_ready_(false);
-  if (ready == WOULDBLOCK)
+  const auto &hashed_msg = hashed_tag->get_ndef_message();
+  if (hashed_msg == nullptr)
     return;
 
-  bool success = false;
-  std::vector<uint8_t> response;
-
-  if (ready == READY) {
-    success = this->read_response(PN532_COMMAND_INLISTPASSIVETARGET, response);
-  } else {
-    this->send_ack_();
-  }
-
-  this->requested_read_ = false;
-
-  if (!success) {
-    if (!this->current_uid_.empty()) {
-      auto tag = make_unique<nfc::NfcTag>(this->current_uid_);
-      for (auto *trigger : this->triggers_ontagremoved_)
-        trigger->process(tag);
-    }
-    this->current_uid_.clear();
-    this->turn_off_rf_();
-    return;
-  }
-
-  if (response.empty())
-    return;
-
-  uint8_t num_targets = response[0];
-  if (num_targets != 1) {
-    if (!this->current_uid_.empty()) {
-      auto tag = make_unique<nfc::NfcTag>(this->current_uid_);
-      for (auto *trigger : this->triggers_ontagremoved_)
-        trigger->process(tag);
-    }
-    this->current_uid_.clear();
-    this->turn_off_rf_();
-    return;
-  }
-
-  if (response.size() < 6)
-    return;
-
-  uint8_t sel_res = response[4];
-  uint8_t nfcid_length = response[5];
-  if (response.size() < 6U + nfcid_length)
-    return;
-
-  std::vector<uint8_t> uid(response.begin() + 6, response.begin() + 6 + nfcid_length);
-
-  bool report = true;
-  for (auto *bin_sens : this->binary_sensors_) {
-    if (bin_sens->process(uid))
-      report = false;
-  }
-
-  if (uid.size() == this->current_uid_.size() && !uid.empty()) {
-    bool same = true;
-    for (size_t i = 0; i < uid.size(); ++i)
-      same &= uid[i] == this->current_uid_[i];
-    if (same)
-      return;
-  }
-
-  this->current_uid_ = uid;
-
-  if (this->next_task_ == READ) {
-    std::unique_ptr<nfc::NfcTag> tag;
-
-    if (sel_res == EMV_SAK_DESFIRE) {
-      tag = this->read_emv_tag_(uid);
-    }
-
-    if (!tag) {
-      tag = pn532::PN532::read_tag_(uid);
-    }
-
-    if (!tag) {
-      auto uid_copy = uid;
-      tag = make_unique<nfc::NfcTag>(uid_copy);
-    }
-
-    for (auto *trigger : this->triggers_ontag_)
-      trigger->process(tag);
-
-    if (report) {
-      ESP_LOGD(TAG, "Found new tag '%s'", nfc::format_uid(uid).c_str());
-      if (tag->has_ndef_message()) {
-        const auto &message = tag->get_ndef_message();
-        const auto &records = message->get_records();
-        ESP_LOGD(TAG, "  NDEF formatted records:");
-        for (const auto &record : records) {
-          ESP_LOGD(TAG, "    %s - %s", record->get_type().c_str(), record->get_payload().c_str());
-        }
-      }
-    }
-  } else if (this->next_task_ == CLEAN) {
-    ESP_LOGD(TAG, "  Tag cleaning");
-    if (!pn532::PN532::clean_tag_(uid)) {
-      ESP_LOGE(TAG, "  Tag was not fully cleaned successfully");
-    }
-    ESP_LOGD(TAG, "  Tag cleaned!");
-  } else if (this->next_task_ == FORMAT) {
-    ESP_LOGD(TAG, "  Tag formatting");
-    if (!pn532::PN532::format_tag_(uid)) {
-      ESP_LOGE(TAG, "Error formatting tag as NDEF");
-    }
-    ESP_LOGD(TAG, "  Tag formatted!");
-  } else if (this->next_task_ == WRITE) {
-    if (this->next_task_message_to_write_ != nullptr) {
-      ESP_LOGD(TAG, "  Tag writing");
-      ESP_LOGD(TAG, "  Tag formatting");
-      if (!pn532::PN532::format_tag_(uid)) {
-        ESP_LOGE(TAG, "  Tag could not be formatted for writing");
-      } else {
-        ESP_LOGD(TAG, "  Writing NDEF data");
-        if (!pn532::PN532::write_tag_(uid, this->next_task_message_to_write_)) {
-          ESP_LOGE(TAG, "  Failed to write message to tag");
-        }
-        ESP_LOGD(TAG, "  Finished writing NDEF data");
-        delete this->next_task_message_to_write_;
-        this->next_task_message_to_write_ = nullptr;
-        this->on_finished_write_callback_.call();
-      }
-    }
-  }
-
-  this->read_mode();
-  this->turn_off_rf_();
+  auto new_msg = std::make_unique<nfc::NdefMessage>(*hashed_msg);
+  tag->set_ndef_message(std::move(new_msg));
 }
 
 bool PN532SpiEmv::send_apdu_(const std::vector<uint8_t> &apdu, std::vector<uint8_t> &response) {
   std::vector<uint8_t> command;
   command.reserve(apdu.size() + 2);
-  command.push_back(PN532_COMMAND_INDATAEXCHANGE);
-  command.push_back(0x01);  // Single card support.
+  command.push_back(pn532::PN532_COMMAND_INDATAEXCHANGE);
+  command.push_back(0x01);
   command.insert(command.end(), apdu.begin(), apdu.end());
 
-  if (!this->write_command_(command)) {
-    ESP_LOGW(TAG, "Failed to send APDU command");
-    return false;
-  }
-
-  if (!this->read_response(PN532_COMMAND_INDATAEXCHANGE, response) || response.empty() || response[0] != 0x00) {
-    ESP_LOGW(TAG, "APDU exchange failed");
-    return false;
-  }
-
-  if (response.size() < 3)
+  if (!this->write_command_(command))
     return false;
 
-  response.erase(response.begin());
-  response.erase(response.end() - 2, response.end());
+  std::vector<uint8_t> raw;
+  if (!this->read_response(pn532::PN532_COMMAND_INDATAEXCHANGE, raw) || raw.empty() || raw[0] != 0x00)
+    return false;
+
+  if (raw.size() < 3)
+    return false;
+
+  uint8_t sw1 = raw[raw.size() - 2];
+  uint8_t sw2 = raw[raw.size() - 1];
+  if (sw1 != 0x90 || sw2 != 0x00)
+    return false;
+
+  response.assign(raw.begin() + 1, raw.end() - 2);
   return true;
 }
 
@@ -327,11 +327,13 @@ bool PN532SpiEmv::parse_tag5a_digits_(const std::vector<uint8_t> &bcd, std::vect
   for (uint8_t byte : bcd) {
     uint8_t hi = static_cast<uint8_t>((byte >> 4) & 0x0F);
     uint8_t lo = static_cast<uint8_t>(byte & 0x0F);
+
     if (hi <= 9) {
       digits.push_back(hi);
     } else if (hi != 0x0F) {
       return false;
     }
+
     if (lo <= 9) {
       digits.push_back(lo);
     } else if (lo == 0x0F) {
@@ -339,6 +341,7 @@ bool PN532SpiEmv::parse_tag5a_digits_(const std::vector<uint8_t> &bcd, std::vect
     } else {
       return false;
     }
+
     if (digits.size() > 19)
       return false;
   }
@@ -361,13 +364,15 @@ bool PN532SpiEmv::build_hashed_pan_ndef_(const std::vector<uint8_t> &digits, std
   mbedtls_sha256_starts_ret(&ctx, 0);
   mbedtls_sha256_update_ret(&ctx, reinterpret_cast<const unsigned char *>(pan.data()), pan.size());
   if (!this->salt_.empty())
-    mbedtls_sha256_update_ret(&ctx, reinterpret_cast<const unsigned char *>(this->salt_.data()), this->salt_.size());
+    mbedtls_sha256_update_ret(&ctx, reinterpret_cast<const unsigned char *>(this->salt_.data()),
+                              this->salt_.size());
   mbedtls_sha256_finish_ret(&ctx, digest);
 #else
   mbedtls_sha256_starts(&ctx, 0);
   mbedtls_sha256_update(&ctx, reinterpret_cast<const unsigned char *>(pan.data()), pan.size());
   if (!this->salt_.empty())
-    mbedtls_sha256_update(&ctx, reinterpret_cast<const unsigned char *>(this->salt_.data()), this->salt_.size());
+    mbedtls_sha256_update(&ctx, reinterpret_cast<const unsigned char *>(this->salt_.data()),
+                          this->salt_.size());
   mbedtls_sha256_finish(&ctx, digest);
 #endif
   mbedtls_sha256_free(&ctx);
@@ -377,8 +382,7 @@ bool PN532SpiEmv::build_hashed_pan_ndef_(const std::vector<uint8_t> &digits, std
     std::sprintf(&hex[i * 2], "%02x", digest[i]);
   hex[64] = '\0';
 
-  std::string payload = std::string("pan-sha256:") + hex;
-  make_ndef_text_message(payload, ndef_out);
+  make_ndef_text_message(std::string("pan-sha256:") + hex, ndef_out);
   return true;
 }
 
@@ -398,26 +402,26 @@ std::vector<uint8_t> PN532SpiEmv::construct_pdol_payload_(const std::vector<uint
 
     std::vector<uint8_t> value;
     switch (tag) {
-      case 0x9F66:  // Terminal Transaction Qualifiers
+      case 0x9F66:
         value = {0xF0, 0x20, 0x40, 0x00};
         break;
-      case 0x9F02:  // Amount, Authorised (Numeric)
-      case 0x9F03:  // Amount, Other (Numeric)
+      case 0x9F02:
+      case 0x9F03:
         value = {0x00, 0x00, 0x00, 0x00, 0x10, 0x00};
         break;
-      case 0x9F1A:  // Terminal Country Code (Germany)
+      case 0x9F1A:
         value = {0x02, 0x76};
         break;
-      case 0x5F2A:  // Transaction Currency Code (EUR)
+      case 0x5F2A:
         value = {0x09, 0x78};
         break;
-      case 0x9A: {  // Transaction Date
+      case 0x9A: {
         ESPTime now = ESPTime::from_epoch_local(::time(nullptr));
         value = {static_cast<uint8_t>((now.year - 2000) & 0xFF), static_cast<uint8_t>(now.month),
                  static_cast<uint8_t>(now.day_of_month)};
         break;
       }
-      case 0x9F37:  // Unpredictable Number
+      case 0x9F37:
         value = {0xB5, 0x43, 0xFF, 0x89};
         break;
       default:
@@ -457,7 +461,6 @@ bool PN532SpiEmv::read_record_pan_(uint8_t record, uint8_t sfi, std::vector<uint
 std::unique_ptr<nfc::NfcTag> PN532SpiEmv::read_emv_tag_(const std::vector<uint8_t> &uid) {
   std::vector<uint8_t> response;
 
-  // 1. SELECT PPSE (2PAY.SYS.DDF01)
   static const std::vector<uint8_t> select_ppse = {
       0x00, 0xA4, 0x04, 0x00, 0x0E,
       0x32, 0x50, 0x41, 0x59, 0x2E, 0x53, 0x59, 0x53, 0x2E, 0x44, 0x44, 0x46, 0x30, 0x31,
@@ -467,12 +470,9 @@ std::unique_ptr<nfc::NfcTag> PN532SpiEmv::read_emv_tag_(const std::vector<uint8_
     return nullptr;
 
   std::vector<uint8_t> aid;
-  if (!this->parse_tlv_find_(response, 0x4F, aid) || aid.empty()) {
-    ESP_LOGD(TAG, "EMV AID not found");
+  if (!this->parse_tlv_find_(response, 0x4F, aid) || aid.empty())
     return nullptr;
-  }
 
-  // 2. SELECT application
   std::vector<uint8_t> select_aid = {0x00, 0xA4, 0x04, 0x00, static_cast<uint8_t>(aid.size())};
   select_aid.insert(select_aid.end(), aid.begin(), aid.end());
   select_aid.push_back(0x00);
@@ -484,7 +484,6 @@ std::unique_ptr<nfc::NfcTag> PN532SpiEmv::read_emv_tag_(const std::vector<uint8_
   this->parse_tlv_find_(response, 0x9F38, pdol);
   std::vector<uint8_t> pdol_payload = this->construct_pdol_payload_(pdol);
 
-  // 3. GET PROCESSING OPTIONS
   std::vector<uint8_t> gpo = {0x80, 0xA8, 0x00, 0x00, static_cast<uint8_t>(pdol_payload.size() + 2), 0x83,
                               static_cast<uint8_t>(pdol_payload.size())};
   gpo.insert(gpo.end(), pdol_payload.begin(), pdol_payload.end());
@@ -499,7 +498,7 @@ std::unique_ptr<nfc::NfcTag> PN532SpiEmv::read_emv_tag_(const std::vector<uint8_
     std::vector<uint8_t> ndef;
     if (this->build_hashed_pan_ndef_(digits, ndef)) {
       auto uid_copy = uid;
-      return make_unique<nfc::NfcTag>(uid_copy, nfc::NFC_FORUM_TYPE_2, ndef);
+      return make_unique<nfc::NfcTag>(uid_copy, std::string("EMV"), ndef);
     }
   }
 
@@ -512,15 +511,15 @@ std::unique_ptr<nfc::NfcTag> PN532SpiEmv::read_emv_tag_(const std::vector<uint8_
     uint8_t sfi_byte = afl[pos++];
     uint8_t first_record = afl[pos++];
     uint8_t last_record = afl[pos++];
-    pos++;  // skip offline auth byte
-    uint8_t sfi = static_cast<uint8_t>((sfi_byte & 0xF8) | 0x04);
+    pos++;
+    uint8_t sfi = static_cast<uint8_t>((sfi_byte & EMV_SFI_MASK) | EMV_SFI_READ_CMD_BITS);
 
     for (uint8_t record = first_record; record <= last_record; ++record) {
       if (this->read_record_pan_(record, sfi, digits)) {
         std::vector<uint8_t> ndef;
         if (this->build_hashed_pan_ndef_(digits, ndef)) {
           auto uid_copy = uid;
-          return make_unique<nfc::NfcTag>(uid_copy, nfc::NFC_FORUM_TYPE_2, ndef);
+          return make_unique<nfc::NfcTag>(uid_copy, std::string("EMV"), ndef);
         }
       }
       yield();
