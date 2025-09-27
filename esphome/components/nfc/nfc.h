@@ -45,21 +45,6 @@ static const uint8_t MIFARE_CMD_NAK_CRC_ERROR_XFER_BUFF_VALID = 0x01;
 static const uint8_t MIFARE_CMD_NAK_INVALID_XFER_BUFF_INVALID = 0x04;
 static const uint8_t MIFARE_CMD_NAK_CRC_ERROR_XFER_BUFF_INVALID = 0x05;
 
-// EMV & NFC tags https://www.eftlab.com/knowledge-base/complete-list-of-emv-nfc-tags
-static const uint8_t EMV_TAG_AID = 0x4F;
-static const uint16_t EMV_TAG_PDOL = 0x9F38;
-static const uint16_t EMV_TAG_COMMAND = 0x83;
-static const uint16_t EMV_TAG_TRACK2 = 0x57;
-static const uint16_t EMV_TAG_TRACK1 = 0x56;
-static const uint16_t EMV_TAG_PAN = 0x5A;
-static const uint16_t EMV_TAG_AFL = 0x94;
-// EMV template tags used when walking nested TLV structures (FCI, records, etc.).
-static const uint16_t EMV_TAG_FCI_TEMPLATE = 0x6F;
-static const uint16_t EMV_TAG_FCI_PROPRIETARY_TEMPLATE = 0xA5;
-static const uint16_t EMV_TAG_FCI_ISSUER_DISCRETIONARY = 0xBF0C;
-static const uint16_t EMV_TAG_APPLICATION_TEMPLATE = 0x61;
-static const uint16_t EMV_TAG_RESPONSE_TEMPLATE_FORMAT_2 = 0x77;
-static const uint16_t EMV_TAG_RECORD_TEMPLATE = 0x70;
 static const char *const MIFARE_CLASSIC = "Mifare Classic";
 static const char *const NFC_FORUM_TYPE_2 = "NFC Forum Type 2";
 static const char *const ERROR = "Error";

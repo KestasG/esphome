@@ -4,7 +4,6 @@
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
 
-
 // Based on:
 // - https://cdn-shop.adafruit.com/datasheets/PN532C106_Application+Note_v1.2.pdf
 // - https://www.nxp.com/docs/en/nxp/application-notes/AN133910.pdf
@@ -13,18 +12,9 @@
 namespace esphome {
 namespace pn532 {
 
-static const char *const TAG = "pn532K";
+static const char *const TAG = "pn532";
 
-void PN532::init_busy_pin_() {
-  if (this->busy_pin_ != nullptr) {
-    this->busy_pin_->setup();              // respects YAML mode/inverted
-    this->busy_pin_->digital_write(false); // idle = not busy    
-  }
-}
-
-void PN532::setup() {  
-  ESP_LOGCONFIG(TAG, "Setting up PN532...");
-
+void PN532::setup() {
   // Get version data
   if (!this->write_command_({PN532_COMMAND_VERSION_DATA})) {
     ESP_LOGW(TAG, "Error sending version command, trying again");
@@ -41,8 +31,8 @@ void PN532::setup() {
     this->mark_failed();
     return;
   }
-  ESP_LOGV(TAG, "Found chip PN5%02X", version_data[0]);
-  ESP_LOGV(TAG, "Firmware ver. %d.%d", version_data[1], version_data[2]);
+  ESP_LOGD(TAG, "Found chip PN5%02X", version_data[0]);
+  ESP_LOGD(TAG, "Firmware ver. %d.%d", version_data[1], version_data[2]);
 
   if (!this->write_command_({
           PN532_COMMAND_SAMCONFIGURATION,
@@ -73,7 +63,6 @@ void PN532::setup() {
     this->error_code_ = SAM_COMMAND_FAILED;
     this->mark_failed();
     return;
-    
   }
 
   std::vector<uint8_t> sam_result;
@@ -84,90 +73,10 @@ void PN532::setup() {
     }
     this->error_code_ = SAM_COMMAND_FAILED;
     this->mark_failed();
-  }
-
-
-  // Increase timoeut for InDataExchange  
-  if (!this->write_command_({
-          PN532_COMMAND_RFCONFIGURATION,
-          0x02,         // normal mode
-          0x00,         // RFU
-          0x0B,         // ATR_RES TimeOut  leace defaulr = 102.4 ms
-          0x0B,         // TimeOut during non-DEP communications increase form default 51.2ms to 102.4ms
-      })) {
-    this->error_code_ = SAM_COMMAND_FAILED;
-    this->mark_failed();
-    return;
-    
-  }
-
-  std::vector<uint8_t> rf_result;
-  if (!this->read_response(PN532_COMMAND_RFCONFIGURATION, rf_result)) {
-    ESP_LOGV(TAG, "Invalid RF Timoeut config result: (%u)", rf_result.size());  // NOLINT
-    for (uint8_t dat : rf_result) {
-      ESP_LOGV(TAG, " 0x%02X", dat);
-    }
-    this->error_code_ = SAM_COMMAND_FAILED;
-    this->mark_failed();
     return;
   }
 
-  // Increase retries for InDataExchange  
-  if (!this->write_command_({
-          PN532_COMMAND_RFCONFIGURATION,
-          0x05,         // normal mode
-          0xFF,         // RFU
-          0x01,         // ATR_RES TimeOut  leave defaulr = 102.4 ms
-          0x00,         // TimeOut during non-DEP communications increase form default 51.2ms to 102.4ms
-      })) {
-    this->error_code_ = SAM_COMMAND_FAILED;
-    this->mark_failed();
-    return;
-    
-  }
-
-  
-  if (!this->read_response(PN532_COMMAND_RFCONFIGURATION, rf_result)) {
-    ESP_LOGV(TAG, "Invalid RF retry config result: (%u)", rf_result.size());  // NOLINT
-    for (uint8_t dat : rf_result) {
-      ESP_LOGV(TAG, " 0x%02X", dat);
-    }
-    this->error_code_ = SAM_COMMAND_FAILED;
-    this->mark_failed();
-
-
-    return;
-  }
-
-  
-  // Increase retries for InDataExchange  
-  if (!this->write_command_({
-          PN532_COMMAND_RFCONFIGURATION,
-          0x04,         // normal mode      
-          0x0A
-      })) {
-    this->error_code_ = SAM_COMMAND_FAILED;
-    this->mark_failed();
-    return;
-    
-  }
-
-  
-  if (!this->read_response(PN532_COMMAND_RFCONFIGURATION, rf_result)) {
-    ESP_LOGV(TAG, "Invalid RF retry InDataExchange result: (%u)", rf_result.size());  // NOLINT
-    for (uint8_t dat : rf_result) {
-      ESP_LOGV(TAG, " 0x%02X", dat);
-    }
-    this->error_code_ = SAM_COMMAND_FAILED;
-    this->mark_failed();
-
-
-    return;
-  }
-  
   this->turn_off_rf_();
-
-  this->init_busy_pin_();   
 }
 
 bool PN532::powerdown() {
@@ -213,7 +122,6 @@ void PN532::update() {
 }
 
 void PN532::loop() {
-  ESP_LOGV("pn532.debug", "loop(): rd_ready_=%d requested_read_=%d", this->rd_ready_, this->requested_read_);
   if (!this->requested_read_)
     return;
 
@@ -282,7 +190,7 @@ void PN532::loop() {
   this->current_uid_ = nfcid;
 
   if (next_task_ == READ) {
-    auto tag = this->read_tag_(read[4], nfcid);
+    auto tag = this->read_tag_(nfcid);
     for (auto *trigger : this->triggers_ontag_)
       trigger->process(tag);
 
@@ -445,31 +353,9 @@ void PN532::turn_off_rf_() {
       0x01,  // RF Field
       0x00,  // Off
   });
-
-  std::vector<uint8_t> rf_result;
-  if (!this->read_response(PN532_COMMAND_RFCONFIGURATION, rf_result)) {
-    ESP_LOGV(TAG, "Invalid RF OFF result: (%u)", rf_result.size());  // NOLINT
-    for (uint8_t dat : rf_result) {
-      ESP_LOGV(TAG, " 0x%02X", dat);
-    }
-    this->error_code_ = SAM_COMMAND_FAILED;
-    this->mark_failed();
-
-
-    return;
-  }
 }
 
-std::unique_ptr<nfc::NfcTag> PN532::read_tag_(uint8_t SAK, std::vector<uint8_t> &uid) {
-
-  PN532::BusyGuard busy(this->busy_pin_);//activate busy pin for duration of tag read
-
-  ESP_LOGV(TAG, "Passed SAK 0x%02X", SAK);
-  if(SAK == MIFARE_PLUS_DESFIRE_SAK){  
-    ESP_LOGD(TAG, "Mifare Plus/Desfire. Will try read as EMV");
-    return this->read_mifare_plus_tag_(uid);    
-  }
-  //fallback to legacy resolution
+std::unique_ptr<nfc::NfcTag> PN532::read_tag_(std::vector<uint8_t> &uid) {
   uint8_t type = nfc::guess_tag_type(uid.size());
 
   if (type == nfc::TAG_TYPE_MIFARE_CLASSIC) {
@@ -553,12 +439,6 @@ void PN532::dump_config() {
   }
 
   LOG_UPDATE_INTERVAL(this);
-
-  if (this->busy_pin_ != nullptr) {
-    LOG_PIN("  Busy Pin: ", this->busy_pin_);
-  } else {
-    ESP_LOGD(TAG, "  Busy Pin: not configured");
-  }
 
   for (auto *child : this->binary_sensors_) {
     LOG_BINARY_SENSOR("  ", "Tag", child);
