@@ -1,12 +1,9 @@
 #pragma once
 
-#define private protected
-#include "esphome/components/pn532/pn532.h"
-#undef private
-#include "esphome/components/spi/spi.h"
 #include "esphome/components/nfc/nfc_tag.h"
 #include "esphome/components/nfc/ndef_message.h"
-#include "esphome/core/hal.h"
+#include "esphome/components/pn532/pn532.h"
+#include "esphome/components/spi/spi.h"
 
 #include <memory>
 #include <string>
@@ -21,8 +18,6 @@ class PN532SpiEmv : public pn532::PN532,
  public:
   void setup() override;
   void dump_config() override;
-  void loop() override;
-
   void set_salt(const std::string &salt) { this->salt_ = salt; }
   void set_busy_pin(GPIOPin *pin);
 
@@ -31,6 +26,7 @@ class PN532SpiEmv : public pn532::PN532,
   bool write_data(const std::vector<uint8_t> &data) override;
   bool read_data(std::vector<uint8_t> &data, uint8_t len) override;
   bool read_response(uint8_t command, std::vector<uint8_t> &data) override;
+  std::unique_ptr<nfc::NfcTag> read_tag_(std::vector<uint8_t> &uid) override;
 
   std::unique_ptr<nfc::NfcTag> read_emv_tag_(const std::vector<uint8_t> &uid);
   bool send_apdu_(const std::vector<uint8_t> &apdu, std::vector<uint8_t> &response);

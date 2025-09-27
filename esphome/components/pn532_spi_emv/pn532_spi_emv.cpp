@@ -108,6 +108,36 @@ void PN532SpiEmv::set_busy_pin(GPIOPin *pin) {
   }
 }
 
+std::unique_ptr<nfc::NfcTag> PN532SpiEmv::read_tag_(std::vector<uint8_t> &uid) {
+  auto tag = pn532::PN532::read_tag_(uid);
+  if (!tag)
+    tag = std::make_unique<nfc::NfcTag>(uid);
+
+  struct BusyGuard {
+    explicit BusyGuard(GPIOPin *pin) : pin(pin) {
+      if (this->pin != nullptr)
+        this->pin->digital_write(true);
+    }
+    ~BusyGuard() {
+      if (this->pin != nullptr)
+        this->pin->digital_write(false);
+    }
+    GPIOPin *pin;
+  } guard(this->busy_pin_);
+
+  auto emv_tag = this->read_emv_tag_(uid);
+  if (!emv_tag || !emv_tag->has_ndef_message())
+    return tag;
+
+  const auto &message = emv_tag->get_ndef_message();
+  if (message == nullptr)
+    return tag;
+
+  auto ndef_copy = std::make_unique<nfc::NdefMessage>(*message);
+  tag->set_ndef_message(std::move(ndef_copy));
+  return tag;
+}
+
 bool PN532SpiEmv::is_read_ready() {
   this->enable();
   this->write_byte(0x02);
@@ -188,105 +218,6 @@ bool PN532SpiEmv::read_response(uint8_t command, std::vector<uint8_t> &data) {
 
   data.erase(data.end() - 2, data.end());
   return true;
-}
-
-void PN532SpiEmv::loop() {
-  //ESP_LOGV("pn532.debug", "loop(): rd_ready_=%d requested_read_=%d", this->rd_ready_, this->requested_read_);
-  if (!this->requested_read_)
-    return;
-
-  auto ready = this->read_ready_(false);
-  if (ready == pn532::PN532ReadReady::WOULDBLOCK)
-    return;
-
-  std::vector<uint8_t> frame;
-  bool success = false;
-  if (ready == pn532::PN532ReadReady::READY) {
-    success = this->read_response(pn532::PN532_COMMAND_INLISTPASSIVETARGET, frame);
-  } else {
-    this->send_ack_();
-  }
-
-  this->requested_read_ = false;
-
-  auto reset_to_idle = [&]() {
-    this->turn_off_rf_();
-    this->read_mode();
-  };
-
-  if (!success || frame.empty() || frame[0] != 1) {
-    if (!this->current_uid_.empty()) {
-      auto removed = std::make_unique<nfc::NfcTag>(this->current_uid_);
-      for (auto *trigger : this->triggers_ontagremoved_)
-        trigger->process(removed);
-    }
-    this->current_uid_.clear();
-    reset_to_idle();
-    return;
-  }
-
-  if (frame.size() < 6) {
-    reset_to_idle();
-    return;
-  }
-
-  uint8_t uid_length = frame[5];
-  if (frame.size() < 6U + uid_length) {
-    reset_to_idle();
-    return;
-  }
-
-  std::vector<uint8_t> uid(frame.begin() + 6, frame.begin() + 6 + uid_length);
-
-  bool report = true;
-  for (auto *sensor : this->binary_sensors_) {
-    if (sensor->process(uid))
-      report = false;
-  }
-
-  if (uid == this->current_uid_)
-    return;
-
-  this->current_uid_ = uid;
-
-  struct BusyGuard {
-    explicit BusyGuard(GPIOPin *pin) : pin_(pin) {
-      if (this->pin_ != nullptr)
-        this->pin_->digital_write(true);
-    }
-    ~BusyGuard() {
-      if (this->pin_ != nullptr)
-        this->pin_->digital_write(false);
-    }
-    GPIOPin *pin_;
-  } guard(this->busy_pin_);
-
-  auto emv_tag = this->read_emv_tag_(uid);
-  if (!emv_tag) {
-    ESP_LOGW(TAG, "Failed to read EMV data from tag %s", nfc::format_uid(uid).c_str());
-    auto removed = std::make_unique<nfc::NfcTag>(uid);
-    for (auto *trigger : this->triggers_ontagremoved_)
-      trigger->process(removed);
-    this->current_uid_.clear();
-    reset_to_idle();
-    return;
-  }
-
-  for (auto *trigger : this->triggers_ontag_)
-    trigger->process(emv_tag);
-
-  if (report && emv_tag->has_ndef_message()) {
-    const auto &message = emv_tag->get_ndef_message();
-    if (message != nullptr) {
-      const auto &records = message->get_records();
-      ESP_LOGD(TAG, "Found EMV tag '%s'", nfc::format_uid(uid).c_str());
-      for (const auto &record : records) {
-        ESP_LOGD(TAG, "  %s - %s", record->get_type().c_str(), record->get_payload().c_str());
-      }
-    }
-  }
-
-  reset_to_idle();
 }
 
 bool PN532SpiEmv::send_apdu_(const std::vector<uint8_t> &apdu, std::vector<uint8_t> &response) {
