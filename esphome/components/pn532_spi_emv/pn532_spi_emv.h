@@ -1,10 +1,11 @@
 #pragma once
 
-#include "esphome/core/component.h"
-#include "esphome/components/nfc/automation.h"
-#include "esphome/components/nfc/nfc_tag.h"
+#define private protected
 #include "esphome/components/pn532/pn532.h"
+#undef private
 #include "esphome/components/spi/spi.h"
+#include "esphome/components/nfc/nfc_tag.h"
+#include "esphome/components/nfc/ndef_message.h"
 #include "esphome/core/hal.h"
 
 #include <memory>
@@ -20,15 +21,10 @@ class PN532SpiEmv : public pn532::PN532,
  public:
   void setup() override;
   void dump_config() override;
+  void loop() override;
 
   void set_salt(const std::string &salt) { this->salt_ = salt; }
-  void set_busy_pin(GPIOPin *pin) {
-    this->busy_pin_ = pin;
-    if (this->busy_pin_ != nullptr) {
-      this->busy_pin_->setup();
-      this->busy_pin_->digital_write(false);
-    }
-  }
+  void set_busy_pin(GPIOPin *pin);
 
  protected:
   bool is_read_ready() override;
@@ -36,7 +32,6 @@ class PN532SpiEmv : public pn532::PN532,
   bool read_data(std::vector<uint8_t> &data, uint8_t len) override;
   bool read_response(uint8_t command, std::vector<uint8_t> &data) override;
 
-  void handle_tag(const std::unique_ptr<nfc::NfcTag> &tag);
   std::unique_ptr<nfc::NfcTag> read_emv_tag_(const std::vector<uint8_t> &uid);
   bool send_apdu_(const std::vector<uint8_t> &apdu, std::vector<uint8_t> &response);
   bool parse_tlv_find_(const std::vector<uint8_t> &buffer, uint16_t needle, std::vector<uint8_t> &value);
@@ -47,7 +42,6 @@ class PN532SpiEmv : public pn532::PN532,
   std::vector<uint8_t> construct_pdol_payload_(const std::vector<uint8_t> &pdol);
   bool read_record_pan_(uint8_t record, uint8_t sfi, std::vector<uint8_t> &digits);
 
-  std::unique_ptr<nfc::NfcOnTagTrigger> internal_trigger_;
   GPIOPin *busy_pin_{nullptr};
   std::string salt_{"esphome_pn532"};
 };
