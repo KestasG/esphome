@@ -199,7 +199,7 @@ bool PN532SpiEmv::read_response(uint8_t command, std::vector<uint8_t> &data) {
   uint8_t full_len = header[3];
   uint8_t len = (full_len == 0) ? 0 : full_len - 1;
 
-  if (len < 2) {
+  if (len  == 0) {
     this->disable();
     return false;
   }
