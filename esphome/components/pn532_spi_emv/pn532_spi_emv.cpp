@@ -191,7 +191,7 @@ bool PN532SpiEmv::read_response(uint8_t command, std::vector<uint8_t> &data) {
 }
 
 void PN532SpiEmv::loop() {
-  ESP_LOGV("pn532.debug", "loop(): rd_ready_=%d requested_read_=%d", this->rd_ready_, this->requested_read_);
+  //ESP_LOGV("pn532.debug", "loop(): rd_ready_=%d requested_read_=%d", this->rd_ready_, this->requested_read_);
   if (!this->requested_read_)
     return;
 
@@ -512,14 +512,32 @@ bool PN532SpiEmv::read_record_pan_(uint8_t record, uint8_t sfi, std::vector<uint
     return false;
 
   std::vector<uint8_t> tag_data;
-  if (this->parse_tlv_find_(response, 0x57, tag_data) && this->parse_track2_digits_(tag_data, digits))
-    return true;
+  auto log_digits = [&](const char *source) {
+    std::string pan;
+    pan.reserve(digits.size());
+    for (uint8_t d : digits)
+      pan.push_back(static_cast<char>('0' + d));
+    ESP_LOGD(TAG, "PAN digits (%s): %s", source, pan.c_str());
+  };
 
-  if (this->parse_tlv_find_(response, 0x56, tag_data) && this->parse_track1_digits_(tag_data, digits))
+  if (this->parse_tlv_find_(response, 0x57, tag_data) && this->parse_track2_digits_(tag_data, digits)) {
+    log_digits("track2");
     return true;
+  }
 
-  if (this->parse_tlv_find_(response, 0x5A, tag_data) && this->parse_tag5a_digits_(tag_data, digits))
+  if (this->parse_tlv_find_(response, 0x56, tag_data) && this->parse_track1_digits_(tag_data, digits)) {
+    log_digits("track1");
     return true;
+  }
+
+  if (this->parse_tlv_find_(response, 0x5A, tag_data) && this->parse_tag5a_digits_(tag_data, digits)) {
+    log_digits("tag5A");
+    return true;
+  }
+
+  if (!digits.empty()) {
+    ESP_LOGV(TAG, "Digits: %s", format_hex_pretty(digits).c_str());
+  }
 
   return false;
 }
@@ -560,7 +578,34 @@ std::unique_ptr<nfc::NfcTag> PN532SpiEmv::read_emv_tag_(const std::vector<uint8_
 
   std::vector<uint8_t> digits;
   std::vector<uint8_t> tag_data;
+  auto log_digits = [&](const char *source) {
+    std::string pan;
+    pan.reserve(digits.size());
+    for (uint8_t d : digits)
+      pan.push_back(static_cast<char>('0' + d));
+    ESP_LOGD(TAG, "PAN digits (%s): %s", source, pan.c_str());
+  };
+
   if (this->parse_tlv_find_(response, 0x57, tag_data) && this->parse_track2_digits_(tag_data, digits)) {
+    log_digits("track2");
+    std::vector<uint8_t> ndef;
+    if (this->build_hashed_pan_ndef_(digits, ndef)) {
+      auto uid_copy = uid;
+      return std::make_unique<nfc::NfcTag>(uid_copy, std::string("EMV"), ndef);
+    }
+  }
+
+  if (this->parse_tlv_find_(response, 0x56, tag_data) && this->parse_track1_digits_(tag_data, digits)) {
+    log_digits("track1");
+    std::vector<uint8_t> ndef;
+    if (this->build_hashed_pan_ndef_(digits, ndef)) {
+      auto uid_copy = uid;
+      return std::make_unique<nfc::NfcTag>(uid_copy, std::string("EMV"), ndef);
+    }
+  }
+
+  if (this->parse_tlv_find_(response, 0x5A, tag_data) && this->parse_tag5a_digits_(tag_data, digits)) {
+    log_digits("tag5A");
     std::vector<uint8_t> ndef;
     if (this->build_hashed_pan_ndef_(digits, ndef)) {
       auto uid_copy = uid;
@@ -582,8 +627,9 @@ std::unique_ptr<nfc::NfcTag> PN532SpiEmv::read_emv_tag_(const std::vector<uint8_
 
     for (uint8_t record = first_record; record <= last_record; ++record) {
       if (this->read_record_pan_(record, sfi, digits)) {
+        
         std::vector<uint8_t> ndef;
-        if (this->build_hashed_pan_ndef_(digits, ndef)) {
+        if (this->build_hashed_pan_ndef_(digits, ndef)) {          
           auto uid_copy = uid;
           return std::make_unique<nfc::NfcTag>(uid_copy, std::string("EMV"), ndef);
         }
