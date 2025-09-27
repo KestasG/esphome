@@ -196,12 +196,12 @@ void PN532SpiEmv::loop() {
     return;
 
   auto ready = this->read_ready_(false);
-  if (ready == PN532ReadReady::WOULDBLOCK)
+  if (ready == pn532::PN532ReadReady::WOULDBLOCK)
     return;
 
   std::vector<uint8_t> frame;
   bool success = false;
-  if (ready == PN532ReadReady::READY) {
+  if (ready == pn532::PN532ReadReady::READY) {
     success = this->read_response(pn532::PN532_COMMAND_INLISTPASSIVETARGET, frame);
   } else {
     this->send_ack_();
