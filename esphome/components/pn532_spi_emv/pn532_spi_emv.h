@@ -1,10 +1,7 @@
 #pragma once
 
-#include "esphome/core/component.h"
-#include "esphome/components/nfc/automation.h"
 #include "esphome/components/nfc/nfc_tag.h"
-#include "esphome/components/pn532/pn532.h"
-#include "esphome/core/hal.h"
+#include "esphome/components/pn532_spi/pn532_spi.h"
 
 #include <memory>
 #include <string>
@@ -13,14 +10,12 @@
 namespace esphome {
 namespace pn532_spi_emv {
 
-class PN532SpiEmv : public Component {
+class PN532SpiEmv : public pn532_spi::PN532Spi {
  public:
-  void set_parent(pn532::PN532 *parent);
+  void loop() override;
   void set_salt(const std::string &salt) { this->salt_ = salt; }
-  void set_busy_pin(GPIOPin *pin);
 
  protected:
-  void handle_tag(const std::unique_ptr<nfc::NfcTag> &tag);
   std::unique_ptr<nfc::NfcTag> read_emv_tag_(const std::vector<uint8_t> &uid);
   bool send_apdu_(const std::vector<uint8_t> &apdu, std::vector<uint8_t> &response);
   bool parse_tlv_find_(const std::vector<uint8_t> &buffer, uint16_t needle, std::vector<uint8_t> &value);
@@ -31,10 +26,7 @@ class PN532SpiEmv : public Component {
   std::vector<uint8_t> construct_pdol_payload_(const std::vector<uint8_t> &pdol);
   bool read_record_pan_(uint8_t record, uint8_t sfi, std::vector<uint8_t> &digits);
 
-  pn532::PN532 *parent_{nullptr};
-  std::unique_ptr<nfc::NfcOnTagTrigger> internal_trigger_;
-  GPIOPin *busy_pin_{nullptr};
-  std::string salt_{"esphome_pn532"};
+  std::string salt_ = "esphome_pn532";
 };
 
 }  // namespace pn532_spi_emv
