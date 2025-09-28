@@ -1,4 +1,4 @@
-from esphome import automation
+from esphome import automation, pins
 import esphome.codegen as cg
 from esphome.components import nfc
 import esphome.config_validation as cv
@@ -15,6 +15,8 @@ AUTO_LOAD = ["binary_sensor", "nfc"]
 MULTI_CONF = True
 
 CONF_PN532_ID = "pn532_id"
+CONF_SALT = "salt"
+CONF_BUSY_PIN = "busy_pin"
 
 pn532_ns = cg.esphome_ns.namespace("pn532")
 PN532 = pn532_ns.class_("PN532", cg.PollingComponent)
@@ -47,6 +49,8 @@ PN532_SCHEMA = cv.Schema(
                 cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(nfc.NfcOnTagTrigger),
             }
         ),
+        cv.Optional(CONF_SALT): cv.string,
+        cv.Optional(CONF_BUSY_PIN): pins.gpio_output_pin_schema,
     }
 ).extend(cv.polling_component_schema("1s"))
 
@@ -61,6 +65,13 @@ def CONFIG_SCHEMA(conf):
 
 async def setup_pn532(var, config):
     await cg.register_component(var, config)
+
+    if CONF_SALT in config:
+        cg.add(var.set_salt(config[CONF_SALT]))
+
+    if CONF_BUSY_PIN in config:
+        pin = await cg.gpio_pin_expression(config[CONF_BUSY_PIN])
+        cg.add(var.set_busy_pin(pin))
 
     for conf in config.get(CONF_ON_TAG, []):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID])
