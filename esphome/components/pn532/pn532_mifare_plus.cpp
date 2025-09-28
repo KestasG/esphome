@@ -1,3 +1,9 @@
+/*
+ * DISCLAIMER
+ * This module is provided for informational purposes only and is not a certified EMV implementation.
+ * Use it at your own risk and ensure compliance with local regulations before deploying in production.
+ */
+
 #include <memory>
 
 #include "pn532.h"
@@ -685,6 +691,8 @@ static std::vector<uint8_t> find_tag_(std::vector<uint8_t> &ber_data, uint16_t t
 
 }  // namespace pn532
 }  // namespace esphome
+
+
 
 
 
